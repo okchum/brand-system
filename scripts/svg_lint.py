@@ -113,7 +113,7 @@ def attribute_problem(attr, value):
 def check_element(el, problems, ids):
     ns, tag = split(el.tag)
     # ids count on every element: url(#x) resolves to the first match, editor element or not
-    for value in {v for a, v in el.attrib.items() if split(a) in (("", "id"), (XML_NS, "id"))}:
+    for value in {v for a, v in el.attrib.items() if v and split(a) in (("", "id"), (XML_NS, "id"))}:
         if value in ids:
             problems.append("duplicate id %r" % value)
         ids.add(value)
@@ -146,6 +146,8 @@ def lint_file(path):
     ns, tag = split(root.tag)
     if tag == "svg" and ns == "":
         return ['missing SVG namespace (xmlns="%s")' % SVG_NS]
+    if tag == "svg" and ns != SVG_NS:
+        return ["root <svg> is in namespace %s, not the SVG namespace" % ns]
     problems = []
     if tag != "svg" or ns != SVG_NS:
         problems.append("root element is <%s>, not <svg>" % root.tag)
