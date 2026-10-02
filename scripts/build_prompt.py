@@ -30,10 +30,11 @@ def sections(text):
     """Split at top-level ## headings, ignoring any inside ``` or ~~~ fences."""
     blocks, fence = [], None
     for line in text.splitlines(keepends=True):
-        opener = re.match(r"(`{3,}|~{3,})", line)
+        # CommonMark: up to 3 spaces of indent; a backtick fence's info string has no backticks
+        opener = re.match(r" {0,3}(`{3,}(?!.*`)|~{3,})", line)
         if opener and fence is None:
             fence = opener.group(1)
-        elif opener and line.rstrip() == fence[0] * len(opener.group(1)) and len(opener.group(1)) >= len(fence):
+        elif opener and line.strip() == fence[0] * len(opener.group(1)) and len(opener.group(1)) >= len(fence):
             fence = None
         elif line.startswith("## ") and fence is None:
             blocks.append("")

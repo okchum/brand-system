@@ -140,6 +140,32 @@ class SvgLintTest(Mentions, unittest.TestCase):
             with self.subTest(name):
                 self.assertMentions(self.lint(body), needle)
 
+    def test_metadata_is_not_a_hiding_place(self):
+        for body, needle in (('<metadata><script>alert(1)</script></metadata>', "<script> not allowed"),
+                             ('<metadata><style>@import "http://e/a.css";</style></metadata>', "<style>"),
+                             ('<metadata><image href="http://e/a.png"/></metadata>', "<image> not allowed")):
+            with self.subTest(body):
+                self.assertMentions(self.lint(body), needle)
+
+    def test_editor_namespace_elements_are_ignored_but_their_svg_children_are_not(self):
+        sodipodi = 'xmlns:sodipodi="http://sodipodi.sourceforge.net/DTD/sodipodi-0.dtd"'
+        self.assertEqual(self.lint('<sodipodi:namedview pagecolor="#fff"/><path d="M0 0"/>',
+                                   attrs='viewBox="0 0 1 1" ' + sodipodi), [])
+        self.assertMentions(self.lint('<sodipodi:namedview><script/></sodipodi:namedview>',
+                                      attrs='viewBox="0 0 1 1" ' + sodipodi), "<script> not allowed")
+
+    def test_missing_svg_namespace_is_named(self):
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / "x.svg"
+            p.write_text('<svg viewBox="0 0 1 1"><path d="M0 0"/></svg>')
+            self.assertEqual(svg_lint.lint_file(p), ["missing SVG namespace (xmlns=\"http://www.w3.org/2000/svg\")"])
+
+    def test_deep_nesting_does_not_crash(self):
+        self.assertEqual(self.lint("<g>" * 3000 + "</g>" * 3000), [])
+
+    def test_duplicate_xml_id_is_reported(self):
+        self.assertMentions(self.lint('<g id="a"/><g xml:id="a"/>'), "duplicate id")
+
     def test_processing_instruction_is_rejected(self):
         self.assertMentions(self.lint("", prolog='<?xml-stylesheet href="https://x/a.css"?>'), "processing instruction")
 
@@ -199,7 +225,9 @@ class IconVerifyTest(Mentions, unittest.TestCase):
                  ("cut in IEND crc", png_bytes(8, 8)[:-2], "truncated"),
                  ("IEND bytes inside IDAT, real IEND missing", png_bytes(8, 8)[:33] + b"IEND" * 3, "truncated"),
                  ("zero size", png_bytes(0, 0), "zero-sized"),
-                 ("trailing bytes", png_bytes(8, 8) + b"\n", "after IEND"))
+                 ("trailing bytes", png_bytes(8, 8) + b"\n", "after IEND"),
+                 ("no IDAT", png_bytes(8, 8)[:33] + png_bytes(8, 8)[-12:], "no IDAT"),
+                 ("IEND with data", png_bytes(8, 8)[:-12] + struct.pack(">I", 1) + b"IEND\0" + b"\0" * 4, "IEND"))
         for name, data, needle in cases:
             with self.subTest(name):
                 self.assertMentions(self.verify("a.png", data)["errors"], needle)
@@ -400,6 +428,10 @@ class PackageTest(unittest.TestCase):
             with self.subTest(fence):
                 text = "## 05. A\n\n%smarkdown\n## not a section\n%s\n\n## 06. B\n" % (fence, fence)
                 self.assertEqual([b.split("\n", 1)[0] for b in build_prompt.sections(text)], ["## 05. A", "## 06. B"])
+
+    def test_inline_code_and_indented_fences(self):
+        text = "## 05. A\n```x``` is inline\n   ```\n## inside\n   ```\n## 06. B\n"
+        self.assertEqual([b.split("\n", 1)[0] for b in build_prompt.sections(text)], ["## 05. A", "## 06. B"])
 
     def test_unclosed_fence_or_no_sections_is_an_error(self):
         for text in ("## 05. A\n```\n## 06. B\n", "no headings here\n"):

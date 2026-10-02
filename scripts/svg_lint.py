@@ -6,8 +6,11 @@ Exit: 0 clean, 1 findings, 2 usage or unreadable input.
 A release logo, symbol or brand graphic needs only static shapes, so anything
 outside ALLOWED fails -- scripts, links, raster <image>, <foreignObject>,
 animation, filters, foreign elements -- and an unexpected construct surfaces
-as a finding rather than slipping through. Elements under <metadata> and
-namespaced attributes (inkscape:*, sodipodi:*) are editor data and ignored.
+as a finding rather than slipping through. Flat shapes only: outline text that
+must keep its form, no shadows or filters. Elements in known editor namespaces
+(inkscape, sodipodi, RDF/Dublin Core/Creative Commons metadata) are ignored,
+but SVG elements inside them are still checked, because browsers run and style
+them wherever they sit. Namespaced attributes and aria-*/data-* are ignored.
 
 Also, before any entity can expand: no DOCTYPE, no processing instruction
 (<?xml-stylesheet?> fetches). Then: well-formed XML, <svg> root with viewBox,
@@ -15,7 +18,7 @@ no on* event attribute, no xml:base, href/src only to #fragments, every url()
 in any attribute or <style> pointing to a #fragment (no fetch, no data:
 embed; outline text and inline vectors instead), no image-set()/@import, no
 CSS backslash escapes (they can hide the above), <style> holding text only,
-no duplicate ids. Rendering differences are not covered; compare renders.
+no duplicate id or xml:id. Rendering differences are not covered; compare renders.
 """
 import re
 import sys
@@ -29,6 +32,12 @@ ALLOWED = {
     "svg", "g", "defs", "symbol", "use", "title", "desc", "metadata", "style",
     "path", "rect", "circle", "ellipse", "line", "polyline", "polygon", "text", "tspan",
     "linearGradient", "radialGradient", "stop", "clipPath", "mask", "pattern",
+}
+XML_NS = "http://www.w3.org/XML/1998/namespace"
+EDITOR_NS = {
+    "http://www.inkscape.org/namespaces/inkscape", "http://sodipodi.sourceforge.net/DTD/sodipodi-0.dtd",
+    "http://www.w3.org/1999/02/22-rdf-syntax-ns#", "http://purl.org/dc/elements/1.1/",
+    "http://creativecommons.org/ns#", "http://web.resource.org/cc/",
 }
 CSS_URL = re.compile(r"url\(\s*['\"]?\s*([^'\")\s]*)", re.I)
 
@@ -87,7 +96,7 @@ def prolog_problem(data):
 
 def attribute_problem(attr, value):
     ns, name = split(attr)
-    if name == "base" and ns == "http://www.w3.org/XML/1998/namespace":
+    if name == "base" and ns == XML_NS:
         return "xml:base"
     if name in ("href", "src"):
         return link_problem(name, value)
@@ -101,27 +110,26 @@ def attribute_problem(attr, value):
     return None
 
 
-def walk(el, problems, ids, in_metadata=False):
+def check_element(el, problems, ids):
     ns, tag = split(el.tag)
-    if not in_metadata:
-        if ns != SVG_NS or tag not in ALLOWED:
-            problems.append("<%s> not allowed in release SVG" % (tag if ns in ("", SVG_NS) else el.tag))
-        for attr, value in el.attrib.items():
-            found = attribute_problem(attr, value)
-            if found:
-                problems.append("%s on <%s>" % (found, tag))
-            if split(attr)[1] == "id" and not split(attr)[0]:
-                if value in ids:
-                    problems.append("duplicate id %r" % value)
-                ids.add(value)
-        if tag == "style":
-            if len(el):
-                problems.append("<style> must hold text only")
-            found = css_problem("".join(el.itertext()))
-            if found:
-                problems.append("<style>: %s" % found)
-    for child in el:
-        walk(child, problems, ids, in_metadata or tag == "metadata")
+    if ns in EDITOR_NS:
+        return  # editor data; its SVG children are still visited
+    if ns != SVG_NS or tag not in ALLOWED:
+        problems.append("<%s> not allowed in release SVG" % (tag if ns == SVG_NS else el.tag))
+    for attr, value in el.attrib.items():
+        found = attribute_problem(attr, value)
+        if found:
+            problems.append("%s on <%s>" % (found, tag))
+        if split(attr) in (("", "id"), (XML_NS, "id")):
+            if value in ids:
+                problems.append("duplicate id %r" % value)
+            ids.add(value)
+    if tag == "style":
+        if len(el):
+            problems.append("<style> must hold text only")
+        found = css_problem("".join(el.itertext()))
+        if found:
+            problems.append("<style>: %s" % found)
 
 
 def lint_file(path):
@@ -134,12 +142,17 @@ def lint_file(path):
         root = ET.fromstring(data)
     except ET.ParseError as e:
         return ["invalid XML: %s" % e]
+    ns, tag = split(root.tag)
+    if tag == "svg" and ns == "":
+        return ['missing SVG namespace (xmlns="%s")' % SVG_NS]
     problems = []
-    if split(root.tag)[1] != "svg":
-        problems.append("root element is <%s>, not <svg>" % split(root.tag)[1])
+    if tag != "svg":
+        problems.append("root element is <%s>, not <svg>" % tag)
     if "viewBox" not in root.attrib:
         problems.append("missing viewBox")
-    walk(root, problems, set())
+    ids = set()
+    for el in root.iter():  # iterative, so deep nesting cannot exhaust the stack
+        check_element(el, problems, ids)
     return problems
 
 
