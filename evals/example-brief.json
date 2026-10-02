@@ -1,0 +1,51 @@
+{
+  "name": {
+    "official": "Tidewell",
+    "pronunciation": "TIDE-well",
+    "zh": "潮井",
+    "en": "Tidewell",
+    "relationship": "中文名为意译，两者并列使用",
+    "final": true
+  },
+  "domain": "tidewell.example",
+  "product": {
+    "oneLiner": "演示用虚构产品：给中小团队用的日志检索与告警工具",
+    "category": "developer tools / observability",
+    "capabilities": ["日志检索", "告警规则", "仪表盘"],
+    "nonGoals": ["APM 链路追踪", "安全审计"]
+  },
+  "audience": {
+    "users": ["后端工程师", "值班 SRE"],
+    "buyers": ["技术负责人"],
+    "scenarios": ["半夜被告警叫醒后定位问题", "日常排查慢查询"],
+    "trust": ["告警不漏报", "数据留在自己的云账号里"]
+  },
+  "markets": {
+    "current": ["中国大陆"],
+    "languages": ["zh-Hans", "en"],
+    "future": ["ja"]
+  },
+  "personality": {
+    "traits": ["冷静", "精确", "可靠"],
+    "avoid": ["炫技", "恐吓式营销", "卡通化"]
+  },
+  "references": {
+    "likes": [{ "brand": "Linear", "why": "信息密度高但不压迫" }],
+    "dislikes": [{ "brand": "典型安全厂商官网", "why": "红黑配色和危机感文案" }]
+  },
+  "constraints": {
+    "existingLogo": null,
+    "colors": [],
+    "typefaces": [],
+    "licensing": "只用开源授权字体",
+    "techStack": "静态 HTML + Python 3.9 标准库脚本",
+    "repoConventions": null
+  },
+  "deliverables": ["web", "marketing", "social", "email", "docs"],
+  "resources": {
+    "designTools": [],
+    "network": true,
+    "canInstallDependencies": false,
+    "fontSources": ["Google Fonts"]
+  }
+}

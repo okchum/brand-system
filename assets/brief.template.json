@@ -1,0 +1,51 @@
+{
+  "name": {
+    "official": null,
+    "pronunciation": null,
+    "zh": null,
+    "en": null,
+    "relationship": null,
+    "final": false
+  },
+  "domain": null,
+  "product": {
+    "oneLiner": null,
+    "category": null,
+    "capabilities": [],
+    "nonGoals": []
+  },
+  "audience": {
+    "users": [],
+    "buyers": [],
+    "scenarios": [],
+    "trust": []
+  },
+  "markets": {
+    "current": [],
+    "languages": [],
+    "future": []
+  },
+  "personality": {
+    "traits": [],
+    "avoid": []
+  },
+  "references": {
+    "likes": [],
+    "dislikes": []
+  },
+  "constraints": {
+    "existingLogo": null,
+    "colors": [],
+    "typefaces": [],
+    "licensing": null,
+    "techStack": null,
+    "repoConventions": null
+  },
+  "deliverables": [],
+  "resources": {
+    "designTools": [],
+    "network": null,
+    "canInstallDependencies": null,
+    "fontSources": []
+  }
+}

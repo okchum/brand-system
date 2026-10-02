@@ -1,0 +1,108 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Brand brief",
+  "description": "用户提供或确认过的品牌输入。null / 空数组表示尚未提供，不是品牌事实。",
+  "type": "object",
+  "required": ["name", "product", "audience", "markets", "personality", "deliverables"],
+  "additionalProperties": false,
+  "$defs": {
+    "text": { "type": ["string", "null"] },
+    "list": { "type": "array", "items": { "type": "string" } },
+    "reference": {
+      "type": "object",
+      "required": ["brand", "why"],
+      "properties": { "brand": { "type": "string" }, "why": { "type": "string" } },
+      "additionalProperties": false
+    }
+  },
+  "properties": {
+    "$schema": { "type": "string" },
+    "name": {
+      "type": "object",
+      "properties": {
+        "official": { "$ref": "#/$defs/text", "description": "正式名称，按用户指定拼写与大小写" },
+        "pronunciation": { "$ref": "#/$defs/text" },
+        "zh": { "$ref": "#/$defs/text" },
+        "en": { "$ref": "#/$defs/text" },
+        "relationship": { "$ref": "#/$defs/text", "description": "中英文名的关系：直译 / 音译 / 各自独立 / 只用一种" },
+        "final": { "type": "boolean", "description": "名称是否已定；false 时不得发布最终字标" }
+      },
+      "additionalProperties": false
+    },
+    "domain": { "$ref": "#/$defs/text", "description": "仅作为用户输入，不推断所有权或可注册性" },
+    "product": {
+      "type": "object",
+      "properties": {
+        "oneLiner": { "$ref": "#/$defs/text" },
+        "category": { "$ref": "#/$defs/text" },
+        "capabilities": { "$ref": "#/$defs/list" },
+        "nonGoals": { "$ref": "#/$defs/list", "description": "明确不做什么" }
+      },
+      "additionalProperties": false
+    },
+    "audience": {
+      "type": "object",
+      "properties": {
+        "users": { "$ref": "#/$defs/list" },
+        "buyers": { "$ref": "#/$defs/list" },
+        "scenarios": { "$ref": "#/$defs/list" },
+        "trust": { "$ref": "#/$defs/list", "description": "希望建立的信任" }
+      },
+      "additionalProperties": false
+    },
+    "markets": {
+      "type": "object",
+      "properties": {
+        "current": { "$ref": "#/$defs/list" },
+        "languages": { "$ref": "#/$defs/list", "description": "如 zh-Hans、zh-Hant、en、ja；不从用户所在地推断" },
+        "future": { "$ref": "#/$defs/list" }
+      },
+      "additionalProperties": false
+    },
+    "personality": {
+      "type": "object",
+      "properties": {
+        "traits": { "$ref": "#/$defs/list", "maxItems": 5 },
+        "avoid": { "$ref": "#/$defs/list", "maxItems": 5 }
+      },
+      "additionalProperties": false
+    },
+    "references": {
+      "type": "object",
+      "properties": {
+        "likes": { "type": "array", "items": { "$ref": "#/$defs/reference" } },
+        "dislikes": { "type": "array", "items": { "$ref": "#/$defs/reference" } }
+      },
+      "additionalProperties": false
+    },
+    "constraints": {
+      "type": "object",
+      "properties": {
+        "existingLogo": { "$ref": "#/$defs/text", "description": "路径或说明" },
+        "colors": { "$ref": "#/$defs/list" },
+        "typefaces": { "$ref": "#/$defs/list" },
+        "licensing": { "$ref": "#/$defs/text" },
+        "techStack": { "$ref": "#/$defs/text" },
+        "repoConventions": { "$ref": "#/$defs/text" }
+      },
+      "additionalProperties": false
+    },
+    "deliverables": {
+      "type": "array",
+      "items": {
+        "enum": ["web", "ios", "android", "desktop", "extension", "marketing", "social", "email", "docs", "presentation", "business", "print", "merch"]
+      },
+      "uniqueItems": true
+    },
+    "resources": {
+      "type": "object",
+      "properties": {
+        "designTools": { "$ref": "#/$defs/list" },
+        "network": { "type": ["boolean", "null"] },
+        "canInstallDependencies": { "type": ["boolean", "null"] },
+        "fontSources": { "$ref": "#/$defs/list" }
+      },
+      "additionalProperties": false
+    }
+  }
+}
