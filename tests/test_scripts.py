@@ -216,6 +216,13 @@ class SvgLintTest(Mentions, unittest.TestCase):
             '<g class="st0" style="fill-rule:evenodd; transform: translate(1px, 2px);"/>'
             '<text font-family="A\\B">x</text>'), [])
 
+    def test_semicolons_inside_strings_do_not_split_declarations(self):
+        self.assertEqual(self.lint('<text style="font-family:\'A;B\', sans-serif;fill:#000">x</text>'), [])
+        self.assertMentions(self.lint('<rect style="fill:red;animation:k 1s"/>'), "animation")
+        for style in ("fill:'red;animation:k 1s", "fill:url(#a;animation:k 1s"):
+            with self.subTest(style):
+                self.assertMentions(self.lint('<rect style="%s"/>' % style), "unbalanced")
+
     def test_unclosed_css_comment_fails(self):
         self.assertMentions(self.lint('<rect style="fill:red /* oops"/>'), "comment")
 

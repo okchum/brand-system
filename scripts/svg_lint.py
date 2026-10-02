@@ -88,8 +88,31 @@ def value_problem(text):
     return None
 
 
+def split_declarations(text):
+    """Split on ';' outside quotes and parentheses, so font-family:'A;B' stays one declaration."""
+    parts, buf, quote, depth = [], "", None, 0
+    for ch in text:
+        if quote:
+            quote = None if ch == quote else quote
+        elif ch in "'\"":
+            quote = ch
+        elif ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+        elif ch == ";" and depth <= 0:
+            parts.append(buf)
+            buf = ""
+            continue
+        buf += ch
+    return parts + [buf], quote is None and depth == 0
+
+
 def declarations_problem(text):
-    for decl in text.split(";"):
+    decls, balanced = split_declarations(text)
+    if not balanced:
+        return "unbalanced quote or parenthesis in CSS (%s)" % FLAT
+    for decl in decls:
         if decl.strip():
             name, colon, _ = decl.partition(":")
             name = name.strip().lower()
