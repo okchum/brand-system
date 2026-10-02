@@ -1,4 +1,5 @@
 import json
+import re
 import struct
 import sys
 import tempfile
@@ -36,6 +37,17 @@ def ico_bytes(sizes):
     return header + entries + images
 
 
+def icns_bytes(*kinds):
+    elems = b"".join(k + struct.pack(">I", 9) + b"x" for k in kinds)
+    return b"icns" + struct.pack(">I", 8 + len(elems)) + elems
+
+
+class Mentions:
+    def assertMentions(self, messages, needle):
+        """The specific check fired, not just any check."""
+        self.assertTrue(any(needle in m for m in messages), "%r not in %r" % (needle, messages))
+
+
 class ContrastTest(unittest.TestCase):
     def test_black_on_white_is_21(self):
         self.assertAlmostEqual(contrast.ratio("#000000", "#ffffff"), 21.0, places=2)
@@ -53,10 +65,13 @@ class ContrastTest(unittest.TestCase):
 
     def test_bad_input_exits_2_not_1(self):
         with tempfile.TemporaryDirectory() as d:
-            empty = Path(d) / "pairs.json"
-            empty.write_text("[]")
+            def matrix(content):
+                p = Path(d) / ("m%d.json" % len(list(Path(d).iterdir())))
+                p.write_text(content)
+                return ["--matrix", str(p)]
             for argv in (["#fff", "#000", "--size", "huge"], ["#ggg", "#000"], ["#fff", "#000", "--size"],
-                         ["--matrix", str(empty)], ["--matrix", str(Path(d) / "missing.json")]):
+                         ["#000", "#fff", "large"], matrix("[]"), matrix('{"a": 1}'), matrix('["#000"]'),
+                         matrix('[{"fg": 123, "bg": "#fff"}]'), ["--matrix", str(Path(d) / "missing.json")]):
                 with self.subTest(argv):
                     self.assertEqual(contrast.main(argv), 2)
 
@@ -67,38 +82,58 @@ class ContrastTest(unittest.TestCase):
         ])
         self.assertEqual([r["pass"] for r in rows], [True, False])
 
+    def test_reported_ratio_never_rounds_up_past_the_threshold(self):
+        # #777777 on white is 4.478:1; showing "4.48" next to "fail" is fine, "4.5" would not be
+        for row in contrast.check_matrix([{"fg": "#777777", "bg": "#ffffff"}, {"fg": "#767676", "bg": "#ffffff"}]):
+            self.assertEqual(row["pass"], row["ratio"] >= row["required"])
 
-class SvgLintTest(unittest.TestCase):
-    def lint(self, body, attrs='viewBox="0 0 24 24"'):
+
+class SvgLintTest(Mentions, unittest.TestCase):
+    def lint(self, body, attrs='viewBox="0 0 24 24"', prolog=""):
         with tempfile.TemporaryDirectory() as d:
             p = Path(d) / "x.svg"
-            p.write_text('<svg xmlns="http://www.w3.org/2000/svg" %s>%s</svg>' % (attrs, body))
+            p.write_text(prolog + '<svg xmlns="http://www.w3.org/2000/svg" '
+                         'xmlns:xlink="http://www.w3.org/1999/xlink" %s>%s</svg>' % (attrs, body))
             return svg_lint.lint_file(p)
 
     def test_clean_svg_passes(self):
-        self.assertEqual(self.lint('<path id="a" d="M0 0h24v24z"/><use href="#a"/>'), [])
+        self.assertEqual(self.lint('<path id="a" d="M0 0h24v24z"/><use href="#a"/><use xlink:href=" #a"/>'), [])
+
+    def test_realistic_editor_exports_pass(self):
+        inkscape = ('<svg xmlns="http://www.w3.org/2000/svg" xmlns:inkscape="http://www.inkscape.org/namespaces/inkscape" '
+                    'viewBox="0 0 24 24" inkscape:export-filename="C:\\Users\\me\\logo.png" aria-label="see url(acme.com)">'
+                    '<defs><linearGradient id="g"/></defs><rect fill="url(#g)" style="stroke:url(&quot;#g&quot;)"/></svg>')
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / "x.svg"
+            p.write_text('<?xml version="1.0" encoding="UTF-8"?>\n<!-- Generator: editor -->\n' + inkscape)
+            self.assertEqual(svg_lint.lint_file(p), [])
 
     def test_each_violation_is_reported(self):
         cases = {
-            "script": "<script>alert(1)</script>",
-            "event": '<path onload="x()" d="M0 0"/>',
-            "raster": '<image href="data:image/png;base64,AAAA"/>',
-            "external": '<use href="https://example.com/a.svg#b"/>',
-            "foreignObject": "<foreignObject/>",
-            "duplicate id": '<g id="a"/><g id="a"/>',
-            "css url": '<style>.a{fill:url(https://example.com/x)}</style>',
-            "presentation url": '<rect fill="url(https://example.com/x.svg#g)"/>',
-            "relative url": '<rect filter="url(ext.svg#f)"/>',
-            "animated href": '<a><set attributeName="href" to="javascript:alert(1)"/></a>',
-            "animated xlink": '<animate attributeName="xlink:href" values="https://example.com"/>',
-            "css escape": '<style>@\\69mport "http://x/a.css";</style>',
-            "image-set": '<rect style="fill:image-set(\'http://x/a.png\' 1x)"/>',
-            "xml:base": '<g xml:base="http://example.com/"/>',
-            "src": '<font-face-uri src="http://example.com/f.woff"/>',
+            "script": ("<script>alert(1)</script>", "<script>"),
+            "event": ('<path onload="x()" d="M0 0"/>', "event attribute"),
+            "raster": ('<image href="#a"/>', "<image>"),
+            "external": ('<use href="https://example.com/a.svg#b"/>', "external href"),
+            "embedded href": ('<use href="data:image/svg+xml;base64,AAAA"/>', "embedded"),
+            "foreignObject": ("<foreignObject/>", "<foreignObject>"),
+            "duplicate id": ('<g id="a"/><g id="a"/>', "duplicate id"),
+            "css url": ("<style>.a{fill:url(https://example.com/x)}</style>", "external"),
+            "embedded font": ("<style>@font-face{src:url(data:font/woff2;base64,AA)}</style>", "embedded"),
+            "presentation url": ('<rect fill="url(https://example.com/x.svg#g)"/>', "external"),
+            "relative url": ('<rect filter="url(ext.svg#f)"/>', "external"),
+            "animated href": ('<a><set attributeName="href" to="javascript:alert(1)"/></a>', "rewrites href"),
+            "animated xlink": ('<animate attributeName="xlink:href" values="https://example.com"/>', "rewrites href"),
+            "css escape": ('<style>@\\69mport "http://x/a.css";</style>', "escape"),
+            "image-set": ("<rect style=\"fill:image-set('http://x/a.png' 1x)\"/>", "external"),
+            "xml:base": ('<g xml:base="http://example.com/"/>', "xml:base"),
+            "src": ('<font-face-uri src="http://example.com/f.woff"/>', "external src"),
         }
-        for name, body in cases.items():
+        for name, (body, needle) in cases.items():
             with self.subTest(name):
-                self.assertNotEqual(self.lint(body), [])
+                self.assertMentions(self.lint(body), needle)
+
+    def test_processing_instruction_is_rejected(self):
+        self.assertMentions(self.lint("", prolog='<?xml-stylesheet href="https://x/a.css"?>'), "processing instruction")
 
     def test_quoted_local_url_passes(self):
         defs = '<linearGradient id="g"/>'
@@ -110,7 +145,7 @@ class SvgLintTest(unittest.TestCase):
             with self.subTest(encoding), tempfile.TemporaryDirectory() as d:
                 p = Path(d) / "x.svg"
                 p.write_bytes(doc.encode(encoding))
-                self.assertNotEqual(svg_lint.lint_file(p), [])
+                self.assertMentions(svg_lint.lint_file(p), "DOCTYPE")
 
     def test_doctype_word_in_comment_is_fine(self):
         self.assertEqual(self.lint("<!-- no <!DOCTYPE here -->"), [])
@@ -122,13 +157,13 @@ class SvgLintTest(unittest.TestCase):
             self.assertEqual([p.name for p in svg_lint.iter_svgs([d])], ["A.SVG"])
 
     def test_missing_viewbox_is_reported(self):
-        self.assertNotEqual(self.lint("<path d='M0 0'/>", attrs=""), [])
+        self.assertMentions(self.lint("<path d='M0 0'/>", attrs=""), "viewBox")
 
     def test_invalid_xml_is_reported(self):
-        self.assertNotEqual(self.lint("<path>"), [])
+        self.assertMentions(self.lint("<path>"), "invalid XML")
 
 
-class IconVerifyTest(unittest.TestCase):
+class IconVerifyTest(Mentions, unittest.TestCase):
     def verify(self, name, data):
         with tempfile.TemporaryDirectory() as d:
             p = Path(d) / name
@@ -140,7 +175,7 @@ class IconVerifyTest(unittest.TestCase):
         self.assertEqual((info["format"], info["sizes"], info["errors"]), ("png", [(32, 16)], []))
 
     def test_png_renamed_to_ico_fails(self):
-        self.assertNotEqual(self.verify("favicon.ico", png_bytes(32, 32))["errors"], [])
+        self.assertMentions(self.verify("favicon.ico", png_bytes(32, 32))["errors"], "content is PNG")
 
     def test_real_ico_lists_all_sizes(self):
         info = self.verify("favicon.ico", ico_bytes([16, 32, 256]))
@@ -148,37 +183,44 @@ class IconVerifyTest(unittest.TestCase):
         self.assertEqual(info["sizes"], [(16, 16), (32, 32), (256, 256)])
 
     def test_ico_without_images_fails(self):
-        self.assertNotEqual(self.verify("favicon.ico", ico_bytes([]))["errors"], [])
+        self.assertMentions(self.verify("favicon.ico", ico_bytes([]))["errors"], "no images")
 
-    def test_truncated_or_empty_png_fails(self):
-        for name, data in (("cut header", png_bytes(8, 8)[:20]), ("cut body", png_bytes(8, 8)[:40]),
-                           ("zero size", png_bytes(0, 0))):
+    def test_png_problems_are_named_precisely(self):
+        cases = (("cut header", png_bytes(8, 8)[:20], "truncated PNG header"),
+                 ("cut body", png_bytes(8, 8)[:40], "no IEND"),
+                 ("zero size", png_bytes(0, 0), "zero-sized"),
+                 ("trailing bytes", png_bytes(8, 8) + b"\n", "after IEND"))
+        for name, data, needle in cases:
             with self.subTest(name):
-                self.assertNotEqual(self.verify("a.png", data)["errors"], [])
+                self.assertMentions(self.verify("a.png", data)["errors"], needle)
 
     def test_ico_entry_must_point_at_real_image_data(self):
         data = bytearray(ico_bytes([16]))
         data[6 + 8:6 + 16] = struct.pack("<II", 0, 0)  # size 0, offset 0
-        self.assertNotEqual(self.verify("favicon.ico", bytes(data))["errors"], [])
+        self.assertMentions(self.verify("favicon.ico", bytes(data))["errors"], "does not point at image data")
 
     def test_empty_icns_element_fails(self):
         elem = b"ic10" + struct.pack(">I", 8)
-        self.assertNotEqual(self.verify("a.icns", b"icns" + struct.pack(">I", 16) + elem)["errors"], [])
+        self.assertMentions(self.verify("a.icns", b"icns" + struct.pack(">I", 16) + elem)["errors"], "is empty")
 
-    def test_icns_reports_sizes_of_known_elements(self):
-        elem = b"ic07" + struct.pack(">I", 9) + b"x" + b"is32" + struct.pack(">I", 9) + b"x"
-        info = self.verify("a.icns", b"icns" + struct.pack(">I", 8 + len(elem)) + elem)
-        self.assertEqual((info["errors"], info["sizes"]), ([], [(128, 128), (16, 16)]))
+    def test_icns_reports_every_iconutil_size(self):
+        # the element types iconutil writes for a standard 16-512 @1x/@2x iconset
+        info = self.verify("a.icns", icns_bytes(b"ic04", b"ic11", b"ic05", b"ic12", b"ic07",
+                                                b"ic13", b"ic08", b"ic14", b"ic09", b"ic10"))
+        self.assertEqual(info["errors"], [])
+        self.assertEqual(sorted(set(info["sizes"])), [(s, s) for s in (16, 32, 64, 128, 256, 512, 1024)])
 
     def test_icns_length_must_match_file(self):
-        elem = b"ic07" + struct.pack(">I", 9) + b"x"
-        good = b"icns" + struct.pack(">I", 17) + elem
-        self.assertEqual(self.verify("a.icns", good)["errors"], [])
-        self.assertNotEqual(self.verify("a.icns", b"icns" + struct.pack(">I", 8))["errors"], [])
-        self.assertNotEqual(self.verify("a.icns", b"icns" + struct.pack(">I", 99))["errors"], [])
+        self.assertEqual(self.verify("a.icns", icns_bytes(b"ic07"))["errors"], [])
+        self.assertMentions(self.verify("a.icns", b"icns" + struct.pack(">I", 8))["errors"], "no elements")
+        self.assertMentions(self.verify("a.icns", b"icns" + struct.pack(">I", 99))["errors"], "declared length")
 
 
-class CheckWorkspaceTest(unittest.TestCase):
+class CheckWorkspaceTest(Mentions, unittest.TestCase):
+    APPROVED_G1 = {"gate": "G1", "status": "approved", "scope": "strategy, scope, direction B",
+                   "snapshot": "review/01-directions.html", "version": "0.1.0", "confirmation": "选 B",
+                   "approvedAt": "2026-10-03T10:00:00+08:00"}
+
     def make(self, d, phase=0, approvals=None, status=None):
         d = Path(d)
         for rel in sum((check_workspace.REQUIRED[p] for p in range(phase + 1)), []):
@@ -189,57 +231,74 @@ class CheckWorkspaceTest(unittest.TestCase):
         (d / "project/approvals.json").write_text(json.dumps(approvals or []))
         return d
 
-    def test_complete_phase0_passes(self):
+    def findings(self, phase, approvals=None, release=False, status=None):
         with tempfile.TemporaryDirectory() as d:
-            self.assertEqual(check_workspace.check(self.make(d), 0), [])
+            return check_workspace.check(self.make(d, phase, approvals, status), phase, release=release)
+
+    def test_complete_phase0_passes(self):
+        self.assertEqual(self.findings(0), [])
 
     def test_missing_review_page_fails_phase1(self):
         with tempfile.TemporaryDirectory() as d:
-            self.assertNotEqual(check_workspace.check(self.make(d, phase=0), 1), [])
+            self.assertMentions(check_workspace.check(self.make(d, phase=0, status={"phase": 1, "blockers": []}), 1),
+                                "missing review/01-directions.html")
 
-    def test_approval_without_version_fails(self):
-        with tempfile.TemporaryDirectory() as d:
-            ws = self.make(d, approvals=[{"gate": "G1", "status": "approved", "confirmation": "选 B"}])
-            self.assertNotEqual(check_workspace.check(ws, 0), [])
+    def test_approved_record_needs_every_field(self):
+        for field in check_workspace.APPROVAL_FIELDS:
+            with self.subTest(field):
+                record = {k: v for k, v in self.APPROVED_G1.items() if k != field}
+                self.assertMentions(self.findings(0, [record]), field)
+        no_version = {k: v for k, v in self.APPROVED_G1.items() if k != "version"}
+        self.assertMentions(self.findings(0, [no_version]), "version or hash")
+        self.assertEqual(self.findings(0, [dict(no_version, hash="sha256:ab12")]), [])
 
-    APPROVED_G1 = {"gate": "G1", "status": "approved", "scope": "strategy, scope, direction B",
-                   "snapshot": "review/01-directions.html", "version": "0.1.0", "confirmation": "选 B",
-                   "approvedAt": "2026-10-03T10:00:00+08:00"}
-
-    def findings(self, phase, approvals, release=False, status=None):
-        with tempfile.TemporaryDirectory() as d:
-            ws = self.make(d, phase=phase, approvals=approvals, status=status)
-            return check_workspace.check(ws, phase, release=release)
+    def test_blank_or_non_string_fields_do_not_count(self):
+        for value in (" ", True, ["x"], {"a": 1}):
+            with self.subTest(value):
+                self.assertMentions(self.findings(2, [dict(self.APPROVED_G1, snapshot=value)]), "snapshot")
 
     def test_later_phase_requires_earlier_gates_approved(self):
-        self.assertNotEqual(self.findings(2, [{"gate": "G1", "status": "pending"}]), [])
+        self.assertMentions(self.findings(2, [{"gate": "G1", "status": "pending"}]), "requires gate G1")
         self.assertEqual(self.findings(2, [self.APPROVED_G1]), [])
 
     def test_latest_record_per_gate_wins(self):
-        withdrawn = [self.APPROVED_G1, {"gate": "G1", "status": "changes-requested"}]
-        self.assertNotEqual(self.findings(2, withdrawn), [])
+        for later in ({"gate": "G1", "status": "changes-requested"}, {"gate": "G1", "status": "pending"},
+                      {"gate": "G1", "status": "rejected"}, dict(self.APPROVED_G1, snapshot="")):
+            with self.subTest(later):
+                self.assertMentions(self.findings(2, [self.APPROVED_G1, later]), "requires gate G1")
         reapproved = [{"gate": "G1", "status": "changes-requested"}, self.APPROVED_G1]
         self.assertEqual(self.findings(2, reapproved), [])
 
     def test_release_requires_g5(self):
         gates = [dict(self.APPROVED_G1, gate="G%d" % k) for k in range(1, 5)]
         self.assertEqual(self.findings(5, gates), [])
-        self.assertNotEqual(self.findings(5, gates, release=True), [])
+        self.assertMentions(self.findings(5, gates, release=True), "requires gate G5")
         self.assertEqual(self.findings(5, gates + [dict(self.APPROVED_G1, gate="G5")], release=True), [])
 
     def test_malformed_approval_records_are_findings_not_crashes(self):
         for record in ({"gate": ["G1"], "status": "approved"}, {"status": "approved"},
-                       {"gate": "G9", "status": "pending"}, "G1",
-                       {k: v for k, v in self.APPROVED_G1.items() if k != "snapshot"}):
+                       {"gate": "G9", "status": "pending"}, "G1"):
             with self.subTest(record):
-                self.assertNotEqual(self.findings(0, [record]), [])
+                self.assertMentions(self.findings(0, [record]), "needs gate")
 
     def test_status_phase_must_match_checked_phase(self):
-        self.assertNotEqual(self.findings(0, [], status={"phase": 1, "blockers": []}), [])
+        self.assertMentions(self.findings(0, status={"phase": 1, "blockers": []}), "says phase 1")
 
-    def test_bad_cli_input_exits_2(self):
+    def test_status_shape(self):
+        cases = (({"phase": True, "blockers": []}, "phase must be an integer"),
+                 ({"phase": 0, "blockers": ["x"]}, "blocker #0"),
+                 ({"phase": 0, "blockers": [{"reason": "no network"}]}, "impact, owner, workaround"))
+        for status, needle in cases:
+            with self.subTest(status):
+                self.assertMentions(self.findings(0, status=status), needle)
+
+    def test_cli_exit_codes(self):
         with tempfile.TemporaryDirectory() as d:
-            for argv in ([str(Path(d) / "nope"), "--phase", "0"], [d, "--phase", "\u00b2"], [d, "--phase", "7"]):
+            ws = str(self.make(d))
+            self.assertEqual(check_workspace.main([ws, "--phase", "0"]), 0)
+            self.assertEqual(check_workspace.main([ws, "--phase", "1"]), 1)
+            for argv in ([ws + "/nope", "--phase", "0"], [ws, "--phase", "\u00b2"], [ws, "--phase", "7"],
+                         [ws, "--phase", "4", "--release"]):
                 with self.subTest(argv):
                     self.assertEqual(check_workspace.main(argv), 2)
 
@@ -247,16 +306,9 @@ class CheckWorkspaceTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             ws = self.make(d)
             (ws / "docs/dangling.md").symlink_to(ws / "nowhere.md")
-            self.assertTrue(any("dangling" in f for f in check_workspace.check(ws, 0)))
+            self.assertMentions(check_workspace.check(ws, 0), "dangling")
 
-    def test_status_shape(self):
-        bad = [{"phase": True, "blockers": []}, {"phase": 0, "blockers": ["x"]},
-               {"phase": 0, "blockers": [{"reason": "no network"}]}]
-        for status in bad:
-            with self.subTest(status), tempfile.TemporaryDirectory() as d:
-                self.assertNotEqual(check_workspace.check(self.make(d, status=status), 0), [])
-
-    def test_known_empty_files_are_allowed(self):
+    def test_empty_file_fails_unless_known_placeholder(self):
         with tempfile.TemporaryDirectory() as d:
             ws = self.make(d)
             (ws / "src").mkdir()
@@ -265,13 +317,18 @@ class CheckWorkspaceTest(unittest.TestCase):
             (ws / ".venv").mkdir()
             (ws / ".venv/empty").write_text("")
             self.assertEqual(check_workspace.check(ws, 0), [])
+            (ws / "docs/strategy.md").write_text("")
+            self.assertMentions(check_workspace.check(ws, 0), "empty file docs/strategy.md")
+
+    # Tagged files the manifest creates only when needed, and the either/or rules file.
+    CONDITIONAL = {"docs/assumptions.md", "THIRD_PARTY_NOTICES.md", "AGENTS.md / CLAUDE.md"}
 
     def test_required_files_match_manifest_phase_tags(self):
-        import re
         tree = (ROOT / "references/structure-manifest.md").read_text(encoding="utf-8")
         stack, tagged = [], {}
         for line in tree.split("```text", 1)[1].split("```", 1)[0].splitlines()[1:]:
-            m = re.match(r"^([│├└─ ]*)(\S+)(?:\s+\[(\d)\])?\s*(.*)$", line)
+            m = re.match(r"^([│├└─ ]*)(\S+(?: / \S+)*)(?:\s+\[(\d)\])?\s*(.*)$", line)
+            self.assertFalse(m.group(3) is None and re.search(r"\[\d\]", line), "unparsed tag: " + line)
             depth = len(m.group(1)) // 4
             stack[depth:] = [m.group(2)]
             path = "/".join(s.rstrip("/") for s in stack[1:])  # drop the workspace root
@@ -286,15 +343,6 @@ class CheckWorkspaceTest(unittest.TestCase):
                 self.assertEqual(required[path], int(path[len("review/0")]), path)
             else:
                 self.assertEqual((path, required[path]), ("reports/qa-report.md", 5))
-
-    # tagged files the manifest marks as created only when needed
-    CONDITIONAL = {"docs/assumptions.md", "THIRD_PARTY_NOTICES.md"}
-
-    def test_empty_file_fails(self):
-        with tempfile.TemporaryDirectory() as d:
-            ws = self.make(d)
-            (ws / "docs/strategy.md").write_text("")
-            self.assertNotEqual(check_workspace.check(ws, 0), [])
 
 
 class PackageTest(unittest.TestCase):
@@ -318,8 +366,17 @@ class PackageTest(unittest.TestCase):
         allowed = set(schema["properties"]["deliverables"]["items"]["enum"])
         self.assertTrue(set(example["deliverables"]) <= allowed)
 
+    def test_skill_states_the_record_shapes_the_checker_enforces(self):
+        skill = (ROOT / "SKILL.md").read_text(encoding="utf-8")
+        cw = check_workspace
+        self.assertIn("`{gate, status, %s, version 或 hash}`" % ", ".join(cw.APPROVAL_FIELDS), skill)
+        self.assertIn("`gate` 取 `%s`–`%s`" % (cw.GATES[0], cw.GATES[-1]), skill)
+        self.assertIn("`status` 取 `%s`" % " / ".join(cw.GATE_STATES), skill)
+        self.assertIn("同一 gate 以最后一条为准", skill)
+        self.assertIn("`{%s}`" % ", ".join(cw.BLOCKER_FIELDS), skill)
+        self.assertIn("--release", skill)
+
     def test_single_file_prompt_keeps_section_order(self):
-        import re
         out = build_prompt.build()
         self.assertFalse(out.startswith("---"))
         heads = re.findall(r"(?m)^## (\d\d|附录 [A-Z])", out)
@@ -328,11 +385,9 @@ class PackageTest(unittest.TestCase):
         self.assertEqual(heads[len(nums):], sorted(heads[len(nums):]))
         self.assertNotIn("END OF", out)
 
-    def test_skill_documents_the_state_fields_the_checker_enforces(self):
-        skill = (ROOT / "SKILL.md").read_text(encoding="utf-8")
-        for word in (sorted(check_workspace.GATE_STATES) + list(check_workspace.BLOCKER_FIELDS)
-                     + list(check_workspace.APPROVAL_FIELDS) + ["version", "hash", "--release"]):
-            self.assertIn(word, skill)
+    def test_headings_inside_code_fences_are_not_sections(self):
+        text = "## 05. A\n\n```markdown\n## not a section\n```\n\n## 06. B\n"
+        self.assertEqual([b.split("\n", 1)[0] for b in build_prompt.sections(text)], ["## 05. A", "## 06. B"])
 
     def test_usage_errors_exit_2(self):
         self.assertEqual(build_prompt.main(["--help"]), 2)
@@ -346,7 +401,6 @@ class PackageTest(unittest.TestCase):
             self.assertIn(first_heading, out, ref.name)
 
     def test_skill_reference_table_points_to_existing_files(self):
-        import re
         skill = (ROOT / "SKILL.md").read_text(encoding="utf-8")
         # bare names are skill references; workspace files are always written with a path prefix
         named = set(re.findall(r"`([\w-]+\.md)`", skill)) - {"AGENTS.md", "CLAUDE.md"}

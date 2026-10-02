@@ -3,13 +3,18 @@
 Usage: check_workspace.py WORKSPACE --phase N [--release]
 Exit: 0 clean, 1 findings, 2 usage (bad arguments or WORKSPACE is not a directory).
 
-Verifies required files for phases 0..N exist and are non-empty, status.json
-says the workspace is at phase N, and gates G1..G(N-1) are approved (plus G5
-with --release, which needs --phase 5). approvals.json is an append-only list:
-the last record for a gate decides its state, so a later changes-requested
-withdraws an earlier approval. An approved record must carry scope, snapshot,
-confirmation, approvedAt and a version or hash. It checks presence and shape
-only; it cannot judge design quality or whether an approval was real.
+Verifies required files for phases 0..N exist; no file anywhere in the
+workspace is empty (known placeholders aside) or a dangling link;
+brand.brief.json parses; status.json says the workspace is at phase N with
+well-formed blockers; and gates G1..G(N-1) are approved (plus G5 with
+--release, which needs --phase 5).
+
+approvals.json is an append-only list. The last record naming a gate decides
+that gate: a later changes-requested, pending or malformed record withdraws an
+earlier approval. An approved record must carry scope, snapshot, confirmation,
+approvedAt and a version or hash, each a non-blank string. Records naming no
+gate are reported and otherwise ignored. It checks presence and shape only; it
+cannot judge design quality or whether an approval was real.
 """
 import json
 import os
@@ -28,7 +33,7 @@ REQUIRED = {
         "docs/platform-specs.md", "docs/licensing.md", "manifests/assets.source.json"],
     5: ["review/05-release.html", "CHANGELOG.md", "docs/handoff-by-role.md", "reports/qa-report.md"],
 }
-GATE_STATES = {"pending", "approved", "changes-requested"}
+GATE_STATES = ("pending", "approved", "changes-requested")
 BLOCKER_FIELDS = ("reason", "impact", "owner", "workaround")
 APPROVAL_FIELDS = ("scope", "snapshot", "confirmation", "approvedAt")
 GATES = ["G%d" % k for k in range(1, 6)]
@@ -83,6 +88,11 @@ def check_status(ws, phase, problems):
             problems.append("project/status.json: blocker #%d missing %s" % (i, ", ".join(missing)))
 
 
+def present(record, key):
+    value = record.get(key)
+    return isinstance(value, str) and bool(value.strip())
+
+
 def check_approvals(ws, phase, release, problems):
     records = load_json(ws, "project/approvals.json", problems)
     if records is None:
@@ -92,20 +102,25 @@ def check_approvals(ws, phase, release, problems):
         records = []
     latest = {}
     for i, a in enumerate(records):
-        if not isinstance(a, dict) or a.get("gate") not in GATES or a.get("status") not in GATE_STATES:
-            problems.append("approval #%d: needs gate in %s and status in %s" % (i, GATES, sorted(GATE_STATES)))
+        gate = a.get("gate") if isinstance(a, dict) else None
+        if not isinstance(gate, str) or gate not in GATES:
+            problems.append("approval #%d: needs gate in %s" % (i, GATES))
             continue
-        if a["status"] == "approved":
-            missing = [k for k in APPROVAL_FIELDS if not a.get(k)]
-            if not (a.get("version") or a.get("hash")):
+        state = a.get("status")
+        if state not in GATE_STATES:
+            problems.append("approval #%d (%s): status must be one of %s" % (i, gate, list(GATE_STATES)))
+            state = "invalid"
+        elif state == "approved":
+            missing = [k for k in APPROVAL_FIELDS if not present(a, k)]
+            if not (present(a, "version") or present(a, "hash")):
                 missing.append("version or hash")
             if missing:
-                problems.append("approval #%d (%s): approved without %s" % (i, a["gate"], ", ".join(missing)))
-                a = dict(a, status="invalid")
-        latest[a["gate"]] = a
+                problems.append("approval #%d (%s): approved without %s" % (i, gate, ", ".join(missing)))
+                state = "invalid"
+        latest[gate] = state
     needed = GATES[:max(phase - 1, 0)] + (["G5"] if release else [])
     for gate in needed:
-        if latest.get(gate, {}).get("status") != "approved":
+        if latest.get(gate) != "approved":
             problems.append("phase %d requires gate %s approved (latest record decides)" % (phase, gate))
 
 

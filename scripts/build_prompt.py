@@ -1,6 +1,7 @@
 """Assemble SKILL.md and all references into one paste-able prompt.
 
 Usage: build_prompt.py [OUT]   # default dist/brand-system-prompt.md
+Exit: 0 written, 2 usage or a source file it cannot order.
 
 For chat tools that cannot load a skill directory. Sections from SKILL.md and
 references/ are merged back into section-number order (appendices last); the
@@ -16,7 +17,6 @@ NOTE = (
     "> 下文已按章节号包含全部 references，忽略“按阶段读取 references”的说明；"
     "`<skill>/scripts/` 在此模式下不可用，相应检查需自行实现并在报告里注明方法。"
 )
-SECTION = re.compile(r"(?m)^(?=## )")
 
 
 def section_key(block):
@@ -27,12 +27,21 @@ def section_key(block):
 
 
 def sections(text):
-    return [re.sub(r"\n-{3,}\s*$", "", b.rstrip()) for b in SECTION.split(text) if b.startswith("## ")]
+    """Split at top-level ## headings, ignoring any inside ``` fences."""
+    blocks, fenced = [], False
+    for line in text.splitlines(keepends=True):
+        if line.startswith("```"):
+            fenced = not fenced
+        if line.startswith("## ") and not fenced:
+            blocks.append("")
+        if blocks:
+            blocks[-1] += line
+    return [re.sub(r"\n-{3,}\s*$", "", b.rstrip()) for b in blocks]
 
 
 def build():
     skill = re.sub(r"\A---\n.*?\n---\n+", "", (ROOT / "SKILL.md").read_text(encoding="utf-8"), flags=re.S)
-    preamble = SECTION.split(skill, 1)[0].rstrip()
+    preamble = skill[:skill.index(sections(skill)[0])].rstrip()
     preamble = re.sub(r"\n-{3,}\s*$", "", preamble)
     title, rest = preamble.split("\n", 1)
     blocks = sections(skill)
@@ -47,8 +56,13 @@ def main(argv):
         print(__doc__)
         return 2
     out = Path(argv[0]) if argv else ROOT / "dist" / "brand-system-prompt.md"
-    out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_text(build(), encoding="utf-8")
+    try:
+        text = build()
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(text, encoding="utf-8")
+    except (OSError, ValueError) as e:
+        print("error: %s" % e, file=sys.stderr)
+        return 2
     print("wrote %s" % out)
     return 0
 

@@ -27,11 +27,11 @@ description: 为一个软件产品建立生产导向的完整品牌系统仓库�
 | 脚本 | 用途 |
 |---|---|
 | `<skill>/scripts/contrast.py` | WCAG 对比度：单个配对或整个配对矩阵（JSON） |
-| `<skill>/scripts/svg_lint.py` | SVG 发布检查：DOCTYPE/实体、XML、viewBox、脚本、事件属性、`foreignObject`、外部引用（含属性与 CSS 中的 `url()`）、改写 href 的动画、内嵌栅格、重复 id |
+| `<skill>/scripts/svg_lint.py` | SVG 发布检查：DOCTYPE、processing instruction、XML、viewBox、脚本、事件属性、`foreignObject`、外部引用与 `data:` 内嵌（href/src 与 CSS 生效处的 `url()`）、改写 href 的动画、内嵌栅格、重复 id |
 | `<skill>/scripts/icon_verify.py` | 按文件头判断 PNG/ICO/ICNS 的真实格式与尺寸，识别改扩展名冒充的文件 |
-| `<skill>/scripts/check_workspace.py` | `<工作区> --phase N [--release]`：检查阶段 0–N 应有的文件、状态文件格式、G1–G(N-1) 是否已批准；`--release` 另查 G5 |
+| `<skill>/scripts/check_workspace.py` | `<工作区> --phase N [--release]`：检查阶段 0–N 应有的文件、整个工作区有无空文件或失效链接、brief 能否解析、状态文件格式、G1–G(N-1) 是否已批准；`--release` 另查 G5 |
 
-脚本只用 Python 3.9 标准库；退出码 0 为通过、1 为有发现、2 为用法或输入错误。把输出保存到工作区的 `reports/`。脚本没覆盖的检查照常执行，在报告里注明方法。
+脚本只用 Python 3.9 标准库；退出码 0 为通过、1 为有发现、2 为用法或输入错误（`build_prompt.py` 只有 0 和 2）。把输出保存到工作区的 `reports/`。脚本没覆盖的检查照常执行，在报告里注明方法。
 
 ---
 
@@ -170,7 +170,7 @@ description: 为一个软件产品建立生产导向的完整品牌系统仓库�
 
 - `project/status.json`：`{phase, state, completed, next, blockers}`；`phase` 为整数，`blockers` 为数组，每条是需外部工具/用户/供应商解决的问题，写成 `{reason, impact, owner, workaround}`。
 - `project/plan.md`：剩余里程碑和验收条件。
-- `project/approvals.json`：仅更新真实批准记录。
+- `project/approvals.json`：只追加真实的审批、撤回或修改要求记录（格式见第 04 节），不改写旧记录。
 - `project/decisions.md`：简要结论、理由、取舍和影响。
 - `project/handoff.md`：下次必须读的文件、最后执行命令、最近测试结果、未完成动作与恢复方法。
 

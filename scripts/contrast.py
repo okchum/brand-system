@@ -9,6 +9,7 @@ FG may carry alpha (#RRGGBBAA); it is composited over BG before measuring,
 so pass the real backdrop, not the palette swatch.
 """
 import json
+import math
 import sys
 
 THRESHOLDS = {"normal": 4.5, "large": 3.0, "ui": 3.0}
@@ -45,12 +46,21 @@ def passes(r, size="normal"):
     return r >= THRESHOLDS[size]
 
 
+def shown(r):
+    """Truncate for display so a failing ratio never prints as the threshold (4.4999 -> 4.49)."""
+    return math.floor(r * 100) / 100
+
+
 def check_matrix(rows):
+    if not isinstance(rows, list) or not rows:
+        raise ValueError("matrix must be a non-empty JSON array of {fg, bg, size?} objects")
     out = []
-    for row in rows:
+    for i, row in enumerate(rows):
+        if not isinstance(row, dict) or not all(isinstance(row.get(k), str) for k in ("fg", "bg")):
+            raise ValueError("row %d must be an object with string fg and bg" % i)
         size = row.get("size", "normal")
         r = ratio(row["fg"], row["bg"])
-        out.append(dict(row, ratio=round(r, 2), required=THRESHOLDS.get(size), **{"pass": passes(r, size)}))
+        out.append(dict(row, ratio=shown(r), required=THRESHOLDS.get(size), **{"pass": passes(r, size)}))
     return out
 
 
@@ -65,18 +75,15 @@ def main(argv):
 def run(argv):
     if argv[:1] == ["--matrix"]:
         with open(argv[1], encoding="utf-8") as f:
-            pairs = json.load(f)
-        if not pairs:
-            raise ValueError("matrix is empty; an empty matrix proves nothing")
-        rows = check_matrix(pairs)
+            rows = check_matrix(json.load(f))
         print(json.dumps(rows, ensure_ascii=False, indent=2))
         return 0 if all(r["pass"] for r in rows) else 1
-    if len(argv) < 2:
+    if len(argv) not in (2, 4) or (len(argv) == 4 and argv[2] != "--size"):
         print(__doc__)
         return 2
-    size = argv[argv.index("--size") + 1] if "--size" in argv else "normal"
+    size = argv[3] if len(argv) == 4 else "normal"
     r = ratio(argv[0], argv[1])
-    print("%.2f:1 %s (%s, needs %.1f)" % (r, "PASS" if passes(r, size) else "FAIL", size, THRESHOLDS[size]))
+    print("%.2f:1 %s (%s, needs %.1f)" % (shown(r), "PASS" if passes(r, size) else "FAIL", size, THRESHOLDS[size]))
     return 0 if passes(r, size) else 1
 
 

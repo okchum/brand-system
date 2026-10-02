@@ -3,13 +3,16 @@
 Usage: svg_lint.py PATH [PATH ...]   # files or directories (recursive, any-case .svg)
 Exit: 0 clean, 1 findings, 2 usage or unreadable input.
 
-Checks: no DOCTYPE (aborted before any entity expands), well-formed XML,
-<svg> root with viewBox, no <script>, no on* event attributes, no
-<foreignObject>, no <image> (embedded or linked raster), no xml:base, no href,
-src, CSS url(), image-set() or @import pointing outside the document (in any
-attribute or <style>), no CSS backslash escapes (they can hide the above), no
-animation that rewrites href, no duplicate ids. Rendering differences are not
-covered; compare renders separately.
+Checks, aborting before any entity expands: no DOCTYPE, no processing
+instruction (<?xml-stylesheet?> fetches). Then: well-formed XML, <svg> root
+with viewBox, no <script>, <foreignObject> or <image>, no on* event attribute,
+no xml:base, no href/src that leaves the document, no animation that rewrites
+href, no duplicate ids. CSS is read only where SVG applies it -- the style
+attribute, <style> text and URL-bearing presentation attributes -- and must not
+fetch (url(), image-set(), @import), embed (data: URIs; outline text and
+inline vectors instead) or use backslash escapes, which can hide either.
+Metadata attributes (inkscape:*, aria-*, data-*) are not CSS and are ignored.
+Rendering differences are not covered; compare renders separately.
 """
 import re
 import sys
@@ -18,6 +21,7 @@ import xml.parsers.expat
 from pathlib import Path
 
 CSS_URL = re.compile(r"url\(\s*['\"]?\s*([^'\")\s]*)", re.I)
+URL_ATTRS = {"fill", "stroke", "filter", "clip-path", "mask", "marker-start", "marker-mid", "marker-end", "cursor"}
 ANIMATIONS = {"set", "animate", "animateMotion", "animateTransform"}
 
 
@@ -29,34 +33,55 @@ def css_problem(text):
     low = text.lower()
     if "\\" in text:
         return "CSS backslash escape"
-    if "@import" in low or "image-set(" in low or any(not t.startswith("#") for t in CSS_URL.findall(text)):
+    targets = CSS_URL.findall(text)
+    if "@import" in low or "image-set(" in low or any(t and t[0] != "#" and not t.lower().startswith("data:") for t in targets):
         return "references an external resource"
+    if any(t.lower().startswith("data:") for t in targets):
+        return "embedded resource (outline text / inline vector instead)"
+    if any(not t for t in targets):
+        return "empty url()"
     return None
 
 
-class Doctype(Exception):
+def link_problem(name, value):
+    v = value.strip()
+    if v.startswith("#"):
+        return None
+    if v.lower().startswith("data:"):
+        return "embedded resource in %s (inline the vector instead)" % name
+    return "external %s %r" % (name, value[:60])
+
+
+class Stop(Exception):
     pass
 
 
-def has_doctype(data):
-    def stop(*_):
-        raise Doctype()
+def prolog_problem(data):
+    """DOCTYPE or processing instruction, found before the real parse can expand anything."""
+    def doctype(*_):
+        raise Stop("DOCTYPE declaration (not allowed in release SVG)")
+
+    def pi(target, _):
+        raise Stop("processing instruction <?%s?> (not allowed in release SVG)" % target)
+
     parser = xml.parsers.expat.ParserCreate()
-    parser.StartDoctypeDeclHandler = stop
+    parser.StartDoctypeDeclHandler = doctype
+    parser.ProcessingInstructionHandler = pi
     try:
         parser.Parse(data, True)
-    except Doctype:
-        return True
+    except Stop as e:
+        return str(e)
     except xml.parsers.expat.ExpatError:
-        pass  # reported by the real parse below
-    return False
+        pass  # reported by the real parse
+    return None
 
 
 def lint_file(path):
     data = Path(path).read_bytes()
     # expat honours the BOM/encoding declaration, so this works for UTF-16 too
-    if has_doctype(data):
-        return ["DOCTYPE declaration (not allowed in release SVG)"]
+    found = prolog_problem(data)
+    if found:
+        return [found]
     try:
         root = ET.fromstring(data)
     except ET.ParseError as e:
@@ -71,24 +96,31 @@ def lint_file(path):
         tag = local(el.tag)
         if tag in ("script", "foreignObject", "image"):
             problems.append("<%s> element" % tag)
-        if tag == "style" and el.text and css_problem(el.text):
-            problems.append("<style>: %s" % css_problem(el.text))
+        if tag == "style" and el.text:
+            found = css_problem(el.text)
+            if found:
+                problems.append("<style>: %s" % found)
         if tag in ANIMATIONS and local(el.attrib.get("attributeName", "")).endswith("href"):
             problems.append("<%s> rewrites href" % tag)
         for attr, value in el.attrib.items():
             name = local(attr)
+            namespaced = attr.startswith("{")
+            found = None
             if name.lower().startswith("on"):
-                problems.append("event attribute %s on <%s>" % (name, tag))
-            elif name in ("href", "src") and not value.startswith("#"):
-                problems.append("external %s %r on <%s>" % (name, value[:60], tag))
+                found = "event attribute %s" % name
+            elif name in ("href", "src"):
+                found = link_problem(name, value)
             elif name == "base":
-                problems.append("xml:base on <%s>" % tag)
+                found = "xml:base"
             elif name == "id":
                 if value in ids:
-                    problems.append("duplicate id %r" % value)
+                    found = "duplicate id %r" % value
                 ids.add(value)
-            elif css_problem(value):
-                problems.append("%s on <%s>: %s" % (name, tag, css_problem(value)))
+            elif not namespaced and (name == "style" or name in URL_ATTRS):
+                css = css_problem(value)
+                found = css and "%s: %s" % (name, css)
+            if found:
+                problems.append("%s on <%s>" % (found, tag))
     return problems
 
 

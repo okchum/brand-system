@@ -13,7 +13,7 @@ from pathlib import Path
 PNG_SIG = b"\x89PNG\r\n\x1a\n"
 # ICNS element types with a fixed pixel size; other types (TOC, icnV, ...) carry no image size
 ICNS_SIZES = {
-    b"is32": 16, b"icp4": 16, b"il32": 32, b"icp5": 32, b"ic11": 32, b"ih32": 48, b"icp6": 64,
+    b"is32": 16, b"icp4": 16, b"ic04": 16, b"il32": 32, b"ic05": 32, b"icp5": 32, b"ic11": 32, b"ih32": 48, b"icp6": 64,
     b"ic12": 64, b"it32": 128, b"ic07": 128, b"ic13": 256, b"ic08": 256, b"ic14": 512,
     b"ic09": 512, b"ic10": 1024,
 }
@@ -25,9 +25,13 @@ def sniff(data):
             return "png", [], ["truncated PNG header"]
         w, h = struct.unpack(">II", data[16:24])
         errors = [] if w and h else ["zero-sized PNG"]
-        # ponytail: checks the file ends in IEND, not every chunk CRC; a renderer catches corrupt data
-        if data[-8:-4] != b"IEND":
-            errors.append("truncated PNG (no IEND chunk at end)")
+        # ponytail: checks where IEND sits, not every chunk CRC; walk chunks with zlib.crc32 if
+        # corrupt-but-complete PNGs ever reach release
+        iend = data.rfind(b"IEND")
+        if iend < 0:
+            errors.append("truncated PNG (no IEND chunk)")
+        elif iend + 8 < len(data):
+            errors.append("%d bytes after IEND" % (len(data) - iend - 8))
         return "png", [(w, h)], errors
     if data[:4] == b"\x00\x00\x01\x00" and len(data) >= 6:
         count = struct.unpack("<H", data[4:6])[0]
