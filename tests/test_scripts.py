@@ -198,6 +198,27 @@ class SvgLintTest(Mentions, unittest.TestCase):
                 self.assertMentions(self.lint(body), "flat shapes only")
         self.assertEqual(self.lint('<rect filter="none" style="fill:red"/>'), [])
 
+    def test_css_is_checked_by_property_allowlist(self):
+        # each passed the denylist and changed rendering in a headless Chrome conformance run
+        for body in ("<style>@-webkit-keyframes k{to{fill:blue}}#t{-webkit-animation:k 100s both}</style>",
+                     '<rect style="-webkit-filter:blur(6px)"/>', '<rect style="-webkit-transition:fill 50s"/>',
+                     '<rect style="filter/**/:blur(6px)"/>', '<rect style="transition-property:fill;transition-duration:50s"/>',
+                     "<style>@supports (fill:red){rect{fill:red}}</style>", "<style>rect{&amp;:hover{fill:red}}</style>",
+                     "<style>rect:hover{fill:red}</style>", '<rect style="--c:red;fill:var(--c)"/>',
+                     "<style>#t{fill:attr(data-c type(&lt;color&gt;))}</style>"):
+            with self.subTest(body):
+                self.assertMentions(self.lint(body), "flat shapes only")
+
+    def test_static_css_from_editors_passes(self):
+        self.assertEqual(self.lint(
+            '<style>.st0{fill:#1a2b3c;stroke:#000;stroke-width:2;stroke-linecap:round}'
+            '.st1 , g > .st2{opacity:.5;mix-blend-mode:multiply;font-family:"Inter";font-weight:600}</style>'
+            '<g class="st0" style="fill-rule:evenodd; transform: translate(1px, 2px);"/>'
+            '<text font-family="A\\B">x</text>'), [])
+
+    def test_unclosed_css_comment_fails(self):
+        self.assertMentions(self.lint('<rect style="fill:red /* oops"/>'), "comment")
+
     def test_processing_instruction_is_rejected(self):
         self.assertMentions(self.lint("", prolog='<?xml-stylesheet href="https://x/a.css"?>'), "processing instruction")
 

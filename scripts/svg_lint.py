@@ -10,16 +10,22 @@ as a finding rather than slipping through. Flat shapes only: outline text that
 must keep its form, no shadows or filters. Elements in known editor namespaces
 (inkscape, sodipodi, RDF/Dublin Core/Creative Commons metadata) are ignored,
 but SVG elements inside them are still checked, because browsers run and style
-them wherever they sit. Namespaced attributes and aria-*/data-* are ignored.
+them wherever they sit. Namespaced attributes and aria-*/data-* are ignored;
+CSS that reads them through attr() is rejected.
 
 Also, before any entity can expand: no DOCTYPE, no processing instruction
 (<?xml-stylesheet?> fetches). Then: well-formed XML, <svg> root with viewBox,
 no on* event attribute, no xml:base, href/src only to #fragments, every url()
 in any attribute or <style> pointing to a #fragment (no fetch, no data:
 embed; outline text and inline vectors instead), no image-set()/@import, no
-CSS backslash escapes (they can hide the above), <style> holding text only,
-no CSS animation, transition or filter in any attribute or <style>, no
-duplicate id or xml:id. Rendering differences are not covered; compare renders.
+CSS backslash escapes (they can hide the above; font-family excepted), no
+duplicate id or xml:id. CSS is an allowlist too, because a list of banned
+properties misses vendor prefixes, longhands and comment-split names: after
+comments are stripped, every declaration must be a static paint property in
+STATIC_PROPS, no attr()/var()/env(), and <style> may hold only flat rules with
+simple selectors -- no at-rules, nesting or pseudo-classes. Presentation
+attributes get the same value checks, and filter must be "none". Rendering
+differences are not covered; compare renders.
 """
 import re
 import sys
@@ -41,7 +47,25 @@ EDITOR_NS = {
     "http://creativecommons.org/ns#", "http://web.resource.org/cc/",
 }
 CSS_URL = re.compile(r"url\(\s*['\"]?\s*([^'\")\s]*)", re.I)
-NOT_FLAT = re.compile(r"@keyframes|(?<![\w-])(?:animation(?:-name)?|transition|filter|backdrop-filter)\s*:", re.I)
+# ponytail: static-paint property allowlist; add a property only when an approved asset needs it
+STATIC_PROPS = {
+    "fill", "fill-opacity", "fill-rule", "stroke", "stroke-width", "stroke-linecap", "stroke-linejoin",
+    "stroke-miterlimit", "stroke-dasharray", "stroke-dashoffset", "stroke-opacity", "paint-order",
+    "vector-effect", "opacity", "color", "display", "visibility", "overflow", "clip-path", "clip-rule",
+    "mask", "mask-type", "stop-color", "stop-opacity", "isolation", "mix-blend-mode", "enable-background",
+    "transform", "transform-origin", "transform-box", "shape-rendering", "text-rendering",
+    "color-interpolation", "color-rendering", "image-rendering", "font", "font-family", "font-size",
+    "font-weight", "font-style", "font-stretch", "font-variant", "font-variant-ligatures",
+    "font-variant-caps", "font-variant-numeric", "font-variant-east-asian", "font-feature-settings",
+    "font-kerning", "letter-spacing", "word-spacing", "text-anchor", "text-align", "dominant-baseline",
+    "alignment-baseline", "baseline-shift", "text-decoration", "writing-mode", "direction",
+    "unicode-bidi", "line-height", "white-space", "inline-size", "shape-inside", "shape-padding",
+    "text-orientation", "-inkscape-font-specification",
+}
+FLAT = "flat shapes only"
+DYNAMIC = re.compile(r"\b(?:attr|var|env)\(", re.I)
+RULE = re.compile(r"([^{}]*)\{([^{}]*)\}")
+STATIC_SELECTOR = re.compile(r"""^[\w\s.#,>+~*\-\[\]="'|^$]+$""")
 
 
 def split(name):
@@ -49,19 +73,53 @@ def split(name):
     return ns, local
 
 
-def css_problem(text):
-    if "\\" in text:
-        return "CSS backslash escape"
+def value_problem(text):
+    """Fetches, embeds and computed values, wherever CSS appears."""
     low = text.lower()
     if "@import" in low or "image-set(" in low:
         return "references an external resource"
-    if NOT_FLAT.search(text):
-        return "animation, transition or filter (flat shapes only)"
     for target in CSS_URL.findall(text):
         if target.lower().startswith("data:"):
             return "embedded resource (outline text / inline vector instead)"
         if not target.startswith("#"):
             return "references an external resource" if target else "empty url()"
+    if DYNAMIC.search(text):
+        return "attr()/var()/env() value (%s)" % FLAT
+    return None
+
+
+def declarations_problem(text):
+    for decl in text.split(";"):
+        if decl.strip():
+            name, colon, _ = decl.partition(":")
+            name = name.strip().lower()
+            if not colon or name not in STATIC_PROPS:
+                return "CSS property %r not allowed (%s)" % (name, FLAT)
+    return None
+
+
+def css_problem(text, kind="value", allow_escape=False):
+    """kind: "value" (presentation attribute), "declarations" (style attribute) or "sheet" (<style>)."""
+    if "\\" in text and not allow_escape:
+        return "CSS backslash escape"
+    text = re.sub(r"/\*.*?\*/", " ", text, flags=re.S)
+    if "/*" in text:
+        return "unclosed CSS comment"
+    found = value_problem(text)
+    if found or kind == "value":
+        return found
+    if kind == "declarations":
+        return declarations_problem(text)
+    if "@" in text:
+        return "at-rule (%s)" % FLAT
+    if RULE.sub("", text).strip():
+        return "nested or malformed CSS rule (%s)" % FLAT
+    for selector, body in RULE.findall(text):
+        if not STATIC_SELECTOR.match(selector.strip()):
+            return "selector %r (%s: no pseudo-classes or nesting)" % (selector.strip(), FLAT)
+        found = declarations_problem(body)
+        if found:
+            return found
     return None
 
 
@@ -105,13 +163,14 @@ def attribute_problem(attr, value):
     if name in ("href", "src"):
         return link_problem(name, value)
     if ns or name.startswith(("aria-", "data-")):
-        return None  # editor or accessibility metadata, never applied as CSS
+        return None  # not presentation attributes; CSS reading them via attr() is rejected
     if name.lower().startswith("on"):
         return "event attribute %s" % name
     if name == "filter" and value.strip() != "none":
         return "filter attribute (flat shapes only)"
-    # browsers parse presentation attributes as CSS, escapes and image-set() included
-    css = css_problem(value)
+    # browsers parse presentation attributes as CSS, escapes and image-set() included;
+    # font-family takes no URL, so a backslash in a family name is harmless there
+    css = css_problem(value, "declarations" if name == "style" else "value", allow_escape=name == "font-family")
     return css and "%s: %s" % (name, css)
 
 
@@ -133,7 +192,7 @@ def check_element(el, problems, ids):
     if tag == "style":
         if len(el):
             problems.append("<style> must hold text only")
-        found = css_problem("".join(el.itertext()))
+        found = css_problem("".join(el.itertext()), "sheet")
         if found:
             problems.append("<style>: %s" % found)
 
