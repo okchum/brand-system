@@ -128,7 +128,7 @@ class SvgLintTest(Mentions, unittest.TestCase):
             "css url": ("<style>.a{fill:url(https://example.com/x)}</style>", "external"),
             "embedded font": ("<style>@font-face{src:url(data:font/woff2;base64,AA)}</style>", "embedded"),
             "presentation url": ('<rect fill="url(https://example.com/x.svg#g)"/>', "external"),
-            "relative url": ('<rect filter="url(ext.svg#f)"/>', "external"),
+            "relative url": ('<rect mask="url(ext.svg#f)"/>', "external"),
             "animated xlink": ('<animate attributeName="xlink:href" values="https://example.com"/>', "<animate> not allowed"),
             "css escape": ('<style>@\\69mport "http://x/a.css";</style>', "escape"),
             "image-set": ("<rect style=\"fill:image-set('http://x/a.png' 1x)\"/>", "external"),
@@ -181,6 +181,22 @@ class SvgLintTest(Mentions, unittest.TestCase):
             self.assertMentions(svg_lint.lint_file(p), "not the SVG namespace")
             p.write_text('<svg xmlns="http://example.com/x" viewBox="0 0 1 1"/>')
             self.assertEqual(svg_lint.lint_file(p), ["root <svg> is in namespace http://example.com/x, not the SVG namespace"])
+
+    def test_presentation_attributes_are_parsed_as_css(self):
+        # Chrome fetched each of these in a headless conformance run
+        for attr in ('mask="\\75rl(http://e/a.png)"', "mask=\"image-set('http://e/a.png' 1x)\"",
+                     "mask=\"-webkit-image-set('http://e/a.png' 1x)\"", 'fill="\\75rl(http://e/f.svg#g) green"',
+                     'clip-path="\\75rl(http://e/c.svg#c)"', 'cursor="\\75rl(http://e/u.png), auto"'):
+            with self.subTest(attr):
+                self.assertNotEqual(self.lint("<rect %s/>" % attr), [])
+
+    def test_css_animation_and_filters_are_rejected(self):
+        for body in ("<style>@keyframes k{to{fill:red}}rect{animation:k 1ms forwards}</style>",
+                     "<style>rect{transition:fill 1s}</style>", '<rect filter="blur(6px)"/>',
+                     '<rect style="filter:drop-shadow(5px 5px 0 red)"/>', "<style>g{backdrop-filter:blur(2px)}</style>"):
+            with self.subTest(body):
+                self.assertMentions(self.lint(body), "flat shapes only")
+        self.assertEqual(self.lint('<rect filter="none" style="fill:red"/>'), [])
 
     def test_processing_instruction_is_rejected(self):
         self.assertMentions(self.lint("", prolog='<?xml-stylesheet href="https://x/a.css"?>'), "processing instruction")

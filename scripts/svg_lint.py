@@ -18,7 +18,8 @@ no on* event attribute, no xml:base, href/src only to #fragments, every url()
 in any attribute or <style> pointing to a #fragment (no fetch, no data:
 embed; outline text and inline vectors instead), no image-set()/@import, no
 CSS backslash escapes (they can hide the above), <style> holding text only,
-no duplicate id or xml:id. Rendering differences are not covered; compare renders.
+no CSS animation, transition or filter in any attribute or <style>, no
+duplicate id or xml:id. Rendering differences are not covered; compare renders.
 """
 import re
 import sys
@@ -40,6 +41,7 @@ EDITOR_NS = {
     "http://creativecommons.org/ns#", "http://web.resource.org/cc/",
 }
 CSS_URL = re.compile(r"url\(\s*['\"]?\s*([^'\")\s]*)", re.I)
+NOT_FLAT = re.compile(r"@keyframes|(?<![\w-])(?:animation(?:-name)?|transition|filter|backdrop-filter)\s*:", re.I)
 
 
 def split(name):
@@ -53,6 +55,8 @@ def css_problem(text):
     low = text.lower()
     if "@import" in low or "image-set(" in low:
         return "references an external resource"
+    if NOT_FLAT.search(text):
+        return "animation, transition or filter (flat shapes only)"
     for target in CSS_URL.findall(text):
         if target.lower().startswith("data:"):
             return "embedded resource (outline text / inline vector instead)"
@@ -104,10 +108,11 @@ def attribute_problem(attr, value):
         return None  # editor or accessibility metadata, never applied as CSS
     if name.lower().startswith("on"):
         return "event attribute %s" % name
-    if name == "style" or "url(" in value.lower():
-        css = css_problem(value)
-        return css and "%s: %s" % (name, css)
-    return None
+    if name == "filter" and value.strip() != "none":
+        return "filter attribute (flat shapes only)"
+    # browsers parse presentation attributes as CSS, escapes and image-set() included
+    css = css_problem(value)
+    return css and "%s: %s" % (name, css)
 
 
 def check_element(el, problems, ids):
