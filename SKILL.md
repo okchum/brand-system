@@ -27,7 +27,7 @@ description: 为一个软件产品建立生产导向的完整品牌系统仓库�
 | 脚本 | 用途 |
 |---|---|
 | `<skill>/scripts/contrast.py` | WCAG 对比度：单个配对或整个配对矩阵（JSON） |
-| `<skill>/scripts/svg_lint.py` | SVG 发布检查：DOCTYPE、processing instruction、XML、viewBox、脚本、事件属性、`foreignObject`、外部引用与 `data:` 内嵌（href/src 与 CSS 生效处的 `url()`）、改写 href 的动画、内嵌栅格、重复 id |
+| `<skill>/scripts/svg_lint.py` | SVG 发布检查（白名单）：只允许静态图形元素，脚本、链接、栅格、`foreignObject`、动画、滤镜等一律报出；拒绝 DOCTYPE 与 processing instruction；href/src 与所有 `url()` 只能指向文档内 `#片段`（不外链、不 `data:` 内嵌）；事件属性、viewBox、重复 id。确需新元素时改脚本里的 `ALLOWED` 并记录理由 |
 | `<skill>/scripts/icon_verify.py` | 按文件头判断 PNG/ICO/ICNS 的真实格式与尺寸，识别改扩展名冒充的文件 |
 | `<skill>/scripts/check_workspace.py` | `<工作区> --phase N [--release]`：检查阶段 0–N 应有的文件、整个工作区有无空文件或失效链接、brief 能否解析、状态文件格式、G1–G(N-1) 是否已批准；`--release` 另查 G5 |
 

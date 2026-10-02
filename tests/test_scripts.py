@@ -101,8 +101,12 @@ class SvgLintTest(Mentions, unittest.TestCase):
 
     def test_realistic_editor_exports_pass(self):
         inkscape = ('<svg xmlns="http://www.w3.org/2000/svg" xmlns:inkscape="http://www.inkscape.org/namespaces/inkscape" '
+                    'xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#" '
                     'viewBox="0 0 24 24" inkscape:export-filename="C:\\Users\\me\\logo.png" aria-label="see url(acme.com)">'
-                    '<defs><linearGradient id="g"/></defs><rect fill="url(#g)" style="stroke:url(&quot;#g&quot;)"/></svg>')
+                    '<title>Logo</title><metadata><rdf:RDF><rdf:Description/></rdf:RDF></metadata>'
+                    '<defs><linearGradient id="g"><stop offset="0"/></linearGradient><clipPath id="c"><rect/></clipPath></defs>'
+                    '<g clip-path="url(#c)"><rect fill="url(#g)" style="stroke:url(&quot;#g&quot;)"/>'
+                    '<path d="M0 0h24"/><circle r="1"/><polygon points="0,0 1,1"/></g></svg>')
         with tempfile.TemporaryDirectory() as d:
             p = Path(d) / "x.svg"
             p.write_text('<?xml version="1.0" encoding="UTF-8"?>\n<!-- Generator: editor -->\n' + inkscape)
@@ -110,23 +114,27 @@ class SvgLintTest(Mentions, unittest.TestCase):
 
     def test_each_violation_is_reported(self):
         cases = {
-            "script": ("<script>alert(1)</script>", "<script>"),
+            "script": ("<script>alert(1)</script>", "<script> not allowed"),
             "event": ('<path onload="x()" d="M0 0"/>', "event attribute"),
-            "raster": ('<image href="#a"/>', "<image>"),
+            "raster": ('<image href="#a"/>', "<image> not allowed"),
+            "link": ('<a href="#a"><path d="M0 0"/></a>', "<a> not allowed"),
+            "foreign element": ('<html:iframe xmlns:html="http://www.w3.org/1999/xhtml"/>', "not allowed"),
+            "animation url": ('<rect><set attributeName="fill" to="url(http://evil/x)"/></rect>', "<set> not allowed"),
+            "style after child": ('<style><x/>@import "http://e/a.css";</style>', "<style>"),
             "external": ('<use href="https://example.com/a.svg#b"/>', "external href"),
             "embedded href": ('<use href="data:image/svg+xml;base64,AAAA"/>', "embedded"),
-            "foreignObject": ("<foreignObject/>", "<foreignObject>"),
+            "foreignObject": ("<foreignObject/>", "<foreignObject> not allowed"),
             "duplicate id": ('<g id="a"/><g id="a"/>', "duplicate id"),
             "css url": ("<style>.a{fill:url(https://example.com/x)}</style>", "external"),
             "embedded font": ("<style>@font-face{src:url(data:font/woff2;base64,AA)}</style>", "embedded"),
             "presentation url": ('<rect fill="url(https://example.com/x.svg#g)"/>', "external"),
             "relative url": ('<rect filter="url(ext.svg#f)"/>', "external"),
-            "animated href": ('<a><set attributeName="href" to="javascript:alert(1)"/></a>', "rewrites href"),
-            "animated xlink": ('<animate attributeName="xlink:href" values="https://example.com"/>', "rewrites href"),
+            "animated xlink": ('<animate attributeName="xlink:href" values="https://example.com"/>', "<animate> not allowed"),
             "css escape": ('<style>@\\69mport "http://x/a.css";</style>', "escape"),
             "image-set": ("<rect style=\"fill:image-set('http://x/a.png' 1x)\"/>", "external"),
             "xml:base": ('<g xml:base="http://example.com/"/>', "xml:base"),
-            "src": ('<font-face-uri src="http://example.com/f.woff"/>', "external src"),
+            "src": ('<rect src="http://example.com/f.woff"/>', "external src"),
+            "url in any attribute": ('<rect color-profile="url(http://e/p.icc)"/>', "external"),
         }
         for name, (body, needle) in cases.items():
             with self.subTest(name):
@@ -187,7 +195,9 @@ class IconVerifyTest(Mentions, unittest.TestCase):
 
     def test_png_problems_are_named_precisely(self):
         cases = (("cut header", png_bytes(8, 8)[:20], "truncated PNG header"),
-                 ("cut body", png_bytes(8, 8)[:40], "no IEND"),
+                 ("cut body", png_bytes(8, 8)[:40], "truncated"),
+                 ("cut in IEND crc", png_bytes(8, 8)[:-2], "truncated"),
+                 ("IEND bytes inside IDAT, real IEND missing", png_bytes(8, 8)[:33] + b"IEND" * 3, "truncated"),
                  ("zero size", png_bytes(0, 0), "zero-sized"),
                  ("trailing bytes", png_bytes(8, 8) + b"\n", "after IEND"))
         for name, data, needle in cases:
@@ -386,8 +396,16 @@ class PackageTest(unittest.TestCase):
         self.assertNotIn("END OF", out)
 
     def test_headings_inside_code_fences_are_not_sections(self):
-        text = "## 05. A\n\n```markdown\n## not a section\n```\n\n## 06. B\n"
-        self.assertEqual([b.split("\n", 1)[0] for b in build_prompt.sections(text)], ["## 05. A", "## 06. B"])
+        for fence in ("```", "~~~"):
+            with self.subTest(fence):
+                text = "## 05. A\n\n%smarkdown\n## not a section\n%s\n\n## 06. B\n" % (fence, fence)
+                self.assertEqual([b.split("\n", 1)[0] for b in build_prompt.sections(text)], ["## 05. A", "## 06. B"])
+
+    def test_unclosed_fence_or_no_sections_is_an_error(self):
+        for text in ("## 05. A\n```\n## 06. B\n", "no headings here\n"):
+            with self.subTest(text):
+                with self.assertRaises(ValueError):
+                    build_prompt.sections(text)
 
     def test_usage_errors_exit_2(self):
         self.assertEqual(build_prompt.main(["--help"]), 2)

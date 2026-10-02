@@ -27,15 +27,22 @@ def section_key(block):
 
 
 def sections(text):
-    """Split at top-level ## headings, ignoring any inside ``` fences."""
-    blocks, fenced = [], False
+    """Split at top-level ## headings, ignoring any inside ``` or ~~~ fences."""
+    blocks, fence = [], None
     for line in text.splitlines(keepends=True):
-        if line.startswith("```"):
-            fenced = not fenced
-        if line.startswith("## ") and not fenced:
+        opener = re.match(r"(`{3,}|~{3,})", line)
+        if opener and fence is None:
+            fence = opener.group(1)
+        elif opener and line.rstrip() == fence[0] * len(opener.group(1)) and len(opener.group(1)) >= len(fence):
+            fence = None
+        elif line.startswith("## ") and fence is None:
             blocks.append("")
         if blocks:
             blocks[-1] += line
+    if fence:
+        raise ValueError("unclosed %s code fence" % fence)
+    if not blocks:
+        raise ValueError("no ## sections found")
     return [re.sub(r"\n-{3,}\s*$", "", b.rstrip()) for b in blocks]
 
 

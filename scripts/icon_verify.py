@@ -25,13 +25,23 @@ def sniff(data):
             return "png", [], ["truncated PNG header"]
         w, h = struct.unpack(">II", data[16:24])
         errors = [] if w and h else ["zero-sized PNG"]
-        # ponytail: checks where IEND sits, not every chunk CRC; walk chunks with zlib.crc32 if
+        # ponytail: walks chunk lengths but skips CRCs; add zlib.crc32 per chunk if
         # corrupt-but-complete PNGs ever reach release
-        iend = data.rfind(b"IEND")
-        if iend < 0:
-            errors.append("truncated PNG (no IEND chunk)")
-        elif iend + 8 < len(data):
-            errors.append("%d bytes after IEND" % (len(data) - iend - 8))
+        pos = 8
+        while True:
+            if pos + 12 > len(data):
+                errors.append("truncated PNG (chunk at offset %d cut off)" % pos)
+                break
+            length, kind = struct.unpack(">I", data[pos:pos + 4])[0], data[pos + 4:pos + 8]
+            end = pos + 12 + length
+            if end > len(data):
+                errors.append("truncated PNG (%r chunk at offset %d cut off)" % (kind, pos))
+                break
+            if kind == b"IEND":
+                if end < len(data):
+                    errors.append("%d bytes after IEND" % (len(data) - end))
+                break
+            pos = end
         return "png", [(w, h)], errors
     if data[:4] == b"\x00\x00\x01\x00" and len(data) >= 6:
         count = struct.unpack("<H", data[4:6])[0]

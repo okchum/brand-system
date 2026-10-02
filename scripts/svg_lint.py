@@ -1,18 +1,21 @@
-"""Structural release checks for standalone SVG files.
+"""Structural release checks for standalone SVG files, by allowlist.
 
 Usage: svg_lint.py PATH [PATH ...]   # files or directories (recursive, any-case .svg)
 Exit: 0 clean, 1 findings, 2 usage or unreadable input.
 
-Checks, aborting before any entity expands: no DOCTYPE, no processing
-instruction (<?xml-stylesheet?> fetches). Then: well-formed XML, <svg> root
-with viewBox, no <script>, <foreignObject> or <image>, no on* event attribute,
-no xml:base, no href/src that leaves the document, no animation that rewrites
-href, no duplicate ids. CSS is read only where SVG applies it -- the style
-attribute, <style> text and URL-bearing presentation attributes -- and must not
-fetch (url(), image-set(), @import), embed (data: URIs; outline text and
-inline vectors instead) or use backslash escapes, which can hide either.
-Metadata attributes (inkscape:*, aria-*, data-*) are not CSS and are ignored.
-Rendering differences are not covered; compare renders separately.
+A release logo, symbol or brand graphic needs only static shapes, so anything
+outside ALLOWED fails -- scripts, links, raster <image>, <foreignObject>,
+animation, filters, foreign elements -- and an unexpected construct surfaces
+as a finding rather than slipping through. Elements under <metadata> and
+namespaced attributes (inkscape:*, sodipodi:*) are editor data and ignored.
+
+Also, before any entity can expand: no DOCTYPE, no processing instruction
+(<?xml-stylesheet?> fetches). Then: well-formed XML, <svg> root with viewBox,
+no on* event attribute, no xml:base, href/src only to #fragments, every url()
+in any attribute or <style> pointing to a #fragment (no fetch, no data:
+embed; outline text and inline vectors instead), no image-set()/@import, no
+CSS backslash escapes (they can hide the above), <style> holding text only,
+no duplicate ids. Rendering differences are not covered; compare renders.
 """
 import re
 import sys
@@ -20,26 +23,32 @@ import xml.etree.ElementTree as ET
 import xml.parsers.expat
 from pathlib import Path
 
+SVG_NS = "http://www.w3.org/2000/svg"
+# ponytail: static-shape allowlist; add an element here only when an approved brand asset needs it
+ALLOWED = {
+    "svg", "g", "defs", "symbol", "use", "title", "desc", "metadata", "style",
+    "path", "rect", "circle", "ellipse", "line", "polyline", "polygon", "text", "tspan",
+    "linearGradient", "radialGradient", "stop", "clipPath", "mask", "pattern",
+}
 CSS_URL = re.compile(r"url\(\s*['\"]?\s*([^'\")\s]*)", re.I)
-URL_ATTRS = {"fill", "stroke", "filter", "clip-path", "mask", "marker-start", "marker-mid", "marker-end", "cursor"}
-ANIMATIONS = {"set", "animate", "animateMotion", "animateTransform"}
 
 
-def local(name):
-    return name.rsplit("}", 1)[-1]
+def split(name):
+    ns, _, local = name[1:].partition("}") if name.startswith("{") else ("", "", name)
+    return ns, local
 
 
 def css_problem(text):
-    low = text.lower()
     if "\\" in text:
         return "CSS backslash escape"
-    targets = CSS_URL.findall(text)
-    if "@import" in low or "image-set(" in low or any(t and t[0] != "#" and not t.lower().startswith("data:") for t in targets):
+    low = text.lower()
+    if "@import" in low or "image-set(" in low:
         return "references an external resource"
-    if any(t.lower().startswith("data:") for t in targets):
-        return "embedded resource (outline text / inline vector instead)"
-    if any(not t for t in targets):
-        return "empty url()"
+    for target in CSS_URL.findall(text):
+        if target.lower().startswith("data:"):
+            return "embedded resource (outline text / inline vector instead)"
+        if not target.startswith("#"):
+            return "references an external resource" if target else "empty url()"
     return None
 
 
@@ -76,6 +85,45 @@ def prolog_problem(data):
     return None
 
 
+def attribute_problem(attr, value):
+    ns, name = split(attr)
+    if name == "base" and ns == "http://www.w3.org/XML/1998/namespace":
+        return "xml:base"
+    if name in ("href", "src"):
+        return link_problem(name, value)
+    if ns or name.startswith(("aria-", "data-")):
+        return None  # editor or accessibility metadata, never applied as CSS
+    if name.lower().startswith("on"):
+        return "event attribute %s" % name
+    if name == "style" or "url(" in value.lower():
+        css = css_problem(value)
+        return css and "%s: %s" % (name, css)
+    return None
+
+
+def walk(el, problems, ids, in_metadata=False):
+    ns, tag = split(el.tag)
+    if not in_metadata:
+        if ns != SVG_NS or tag not in ALLOWED:
+            problems.append("<%s> not allowed in release SVG" % (tag if ns in ("", SVG_NS) else el.tag))
+        for attr, value in el.attrib.items():
+            found = attribute_problem(attr, value)
+            if found:
+                problems.append("%s on <%s>" % (found, tag))
+            if split(attr)[1] == "id" and not split(attr)[0]:
+                if value in ids:
+                    problems.append("duplicate id %r" % value)
+                ids.add(value)
+        if tag == "style":
+            if len(el):
+                problems.append("<style> must hold text only")
+            found = css_problem("".join(el.itertext()))
+            if found:
+                problems.append("<style>: %s" % found)
+    for child in el:
+        walk(child, problems, ids, in_metadata or tag == "metadata")
+
+
 def lint_file(path):
     data = Path(path).read_bytes()
     # expat honours the BOM/encoding declaration, so this works for UTF-16 too
@@ -87,40 +135,11 @@ def lint_file(path):
     except ET.ParseError as e:
         return ["invalid XML: %s" % e]
     problems = []
-    if local(root.tag) != "svg":
-        problems.append("root element is <%s>, not <svg>" % local(root.tag))
+    if split(root.tag)[1] != "svg":
+        problems.append("root element is <%s>, not <svg>" % split(root.tag)[1])
     if "viewBox" not in root.attrib:
         problems.append("missing viewBox")
-    ids = set()
-    for el in root.iter():
-        tag = local(el.tag)
-        if tag in ("script", "foreignObject", "image"):
-            problems.append("<%s> element" % tag)
-        if tag == "style" and el.text:
-            found = css_problem(el.text)
-            if found:
-                problems.append("<style>: %s" % found)
-        if tag in ANIMATIONS and local(el.attrib.get("attributeName", "")).endswith("href"):
-            problems.append("<%s> rewrites href" % tag)
-        for attr, value in el.attrib.items():
-            name = local(attr)
-            namespaced = attr.startswith("{")
-            found = None
-            if name.lower().startswith("on"):
-                found = "event attribute %s" % name
-            elif name in ("href", "src"):
-                found = link_problem(name, value)
-            elif name == "base":
-                found = "xml:base"
-            elif name == "id":
-                if value in ids:
-                    found = "duplicate id %r" % value
-                ids.add(value)
-            elif not namespaced and (name == "style" or name in URL_ATTRS):
-                css = css_problem(value)
-                found = css and "%s: %s" % (name, css)
-            if found:
-                problems.append("%s on <%s>" % (found, tag))
+    walk(root, problems, set())
     return problems
 
 
