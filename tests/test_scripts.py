@@ -165,6 +165,19 @@ class SvgLintTest(Mentions, unittest.TestCase):
 
     def test_duplicate_xml_id_is_reported(self):
         self.assertMentions(self.lint('<g id="a"/><g xml:id="a"/>'), "duplicate id")
+        self.assertEqual(self.lint('<path id="a" xml:id="a" d="M0 0"/>'), [])
+
+    def test_editor_element_ids_still_count(self):
+        # url(#g) resolves to the first element with that id, so the editor element would win
+        ink = 'viewBox="0 0 1 1" xmlns:inkscape="http://www.inkscape.org/namespaces/inkscape"'
+        self.assertMentions(self.lint('<inkscape:g id="g"/><linearGradient id="g"/>', attrs=ink), "duplicate id")
+
+    def test_root_must_be_svg_namespace(self):
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / "x.svg"
+            p.write_text('<inkscape:svg xmlns="http://www.w3.org/2000/svg" '
+                         'xmlns:inkscape="http://www.inkscape.org/namespaces/inkscape" viewBox="0 0 1 1"/>')
+            self.assertMentions(svg_lint.lint_file(p), "not <svg>")
 
     def test_processing_instruction_is_rejected(self):
         self.assertMentions(self.lint("", prolog='<?xml-stylesheet href="https://x/a.css"?>'), "processing instruction")

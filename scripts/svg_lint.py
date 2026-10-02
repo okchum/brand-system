@@ -112,6 +112,11 @@ def attribute_problem(attr, value):
 
 def check_element(el, problems, ids):
     ns, tag = split(el.tag)
+    # ids count on every element: url(#x) resolves to the first match, editor element or not
+    for value in {v for a, v in el.attrib.items() if split(a) in (("", "id"), (XML_NS, "id"))}:
+        if value in ids:
+            problems.append("duplicate id %r" % value)
+        ids.add(value)
     if ns in EDITOR_NS:
         return  # editor data; its SVG children are still visited
     if ns != SVG_NS or tag not in ALLOWED:
@@ -120,10 +125,6 @@ def check_element(el, problems, ids):
         found = attribute_problem(attr, value)
         if found:
             problems.append("%s on <%s>" % (found, tag))
-        if split(attr) in (("", "id"), (XML_NS, "id")):
-            if value in ids:
-                problems.append("duplicate id %r" % value)
-            ids.add(value)
     if tag == "style":
         if len(el):
             problems.append("<style> must hold text only")
@@ -146,8 +147,8 @@ def lint_file(path):
     if tag == "svg" and ns == "":
         return ['missing SVG namespace (xmlns="%s")' % SVG_NS]
     problems = []
-    if tag != "svg":
-        problems.append("root element is <%s>, not <svg>" % tag)
+    if tag != "svg" or ns != SVG_NS:
+        problems.append("root element is <%s>, not <svg>" % root.tag)
     if "viewBox" not in root.attrib:
         problems.append("missing viewBox")
     ids = set()
