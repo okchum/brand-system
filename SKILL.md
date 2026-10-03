@@ -29,7 +29,7 @@ description: 为一个软件产品建立生产导向的完整品牌系统仓库�
 | `<skill>/scripts/contrast.py` | WCAG 对比度：单个配对或整个配对矩阵（JSON） |
 | `<skill>/scripts/svg_lint.py` | SVG 发布检查（白名单）：只允许静态图形元素和静态绘制用的 CSS 属性，脚本、链接、栅格、`foreignObject`、动画、过渡、滤镜等一律报出；拒绝 DOCTYPE 与 processing instruction；href/src 与所有 `url()` 只能指向文档内 `#片段`（不外链、不 `data:` 内嵌）；事件属性、viewBox、重复 id。确需新元素时改脚本里的 `ALLOWED` 并记录理由 |
 | `<skill>/scripts/icon_verify.py` | 按文件头判断 PNG/ICO/ICNS 的真实格式与尺寸，识别改扩展名冒充的文件 |
-| `<skill>/scripts/check_workspace.py` | `<工作区> --phase N [--release]`：检查阶段 0–N 应有的文件、整个工作区有无空文件或失效链接、brief 能否解析、状态文件格式、G1–G(N-1) 是否已批准；`--release` 另查 G5 |
+| `<skill>/scripts/check_workspace.py` | `<工作区> --phase N [--release]`：依据 `config/phase_requirements.json` 检查阶段文件、brief schema、状态契约、方向审阅 metadata、空文件/失效链接和审批门；`--release` 另查 G5 |
 
 脚本只用 Python 3.9 标准库；退出码 0 为通过、1 为有发现、2 为用法或输入错误（`build_prompt.py` 只有 0 和 2）。把输出保存到工作区的 `reports/`。脚本没覆盖的检查照常执行，在报告里注明方法。
 

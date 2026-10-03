@@ -15,6 +15,8 @@ import check_workspace  # noqa: E402
 import contrast  # noqa: E402
 import icon_verify  # noqa: E402
 import svg_lint  # noqa: E402
+import directions_check  # noqa: E402
+import validate_brief  # noqa: E402
 
 
 def png_bytes(w, h):
@@ -324,9 +326,11 @@ class CheckWorkspaceTest(Mentions, unittest.TestCase):
         for rel in sum((check_workspace.REQUIRED[p] for p in range(phase + 1)), []):
             (d / rel).parent.mkdir(parents=True, exist_ok=True)
             (d / rel).write_text("x")
-        (d / "brand.brief.json").write_text("{}")
-        (d / "project/status.json").write_text(json.dumps(status or {"phase": phase, "blockers": []}))
+        (d / "brand.brief.json").write_text((ROOT / "evals/example-brief.json").read_text())
+        (d / "project/status.json").write_text(json.dumps(status or {"phase": phase, "state": "draft", "completed": [], "next": [], "blockers": []}))
         (d / "project/approvals.json").write_text(json.dumps(approvals or []))
+        if phase >= 1:
+            (d / "review/01-directions.html").write_text((ROOT / "evals/directions.fixture.html").read_text())
         return d
 
     def findings(self, phase, approvals=None, release=False, status=None):
@@ -399,6 +403,12 @@ class CheckWorkspaceTest(Mentions, unittest.TestCase):
                          [ws, "--phase", "4", "--release"]):
                 with self.subTest(argv):
                     self.assertEqual(check_workspace.main(argv), 2)
+
+    def test_example_brief_matches_schema(self):
+        self.assertEqual(validate_brief.validate_file(ROOT / "evals/example-brief.json"), [])
+
+    def test_directions_contract_requires_three_distinct_metadata_blocks(self):
+        self.assertEqual(directions_check.check(ROOT / "evals/directions.fixture.html"), [])
 
     def test_broken_symlink_is_a_finding(self):
         with tempfile.TemporaryDirectory() as d:

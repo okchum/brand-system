@@ -3,11 +3,8 @@
 Usage: check_workspace.py WORKSPACE --phase N [--release]
 Exit: 0 clean, 1 findings, 2 usage (bad arguments or WORKSPACE is not a directory).
 
-Verifies required files for phases 0..N exist; no file anywhere in the
-workspace is empty (known placeholders aside) or a dangling link;
-brand.brief.json parses; status.json says the workspace is at phase N with
-well-formed blockers; and gates G1..G(N-1) are approved (plus G5 with
---release, which needs --phase 5).
+Verifies the machine-readable phase contract, required files, brief schema,
+direction metadata, status shape, empty/dangling files and approvals.
 
 approvals.json is an append-only list. The last record naming a gate decides
 that gate: a later changes-requested, pending or malformed record withdraws an
@@ -20,23 +17,16 @@ import json
 import os
 import sys
 from pathlib import Path
+from validate_brief import validate_file
+import directions_check
 
-REQUIRED = {
-    0: ["brand.brief.json", "README.md", "project/plan.md", "project/status.json", "project/approvals.json",
-        "project/decisions.md", "project/handoff.md", "docs/scope-matrix.md", "docs/environment.md",
-        "docs/references.md", "docs/strategy.md", "docs/voice.md"],
-    1: ["review/01-directions.html"],
-    2: ["review/02-identity.html", "BRAND_SYSTEM.md", "config/brand.json",
-        "docs/logo.md", "docs/color.md", "docs/typography.md"],
-    3: ["review/03-system.html", "docs/accessibility.md", "config/quality.json"],
-    4: ["review/04-assets.html", "config/platforms.json", "config/exports.json",
-        "docs/platform-specs.md", "docs/licensing.md", "manifests/assets.source.json"],
-    5: ["review/05-release.html", "CHANGELOG.md", "docs/handoff-by-role.md", "reports/qa-report.md"],
-}
+CONFIG = Path(__file__).resolve().parent.parent / "config/phase_requirements.json"
+CONTRACT = json.loads(CONFIG.read_text(encoding="utf-8"))
+REQUIRED = {int(k): v["required"] for k, v in CONTRACT["phases"].items()}
 GATE_STATES = ("pending", "approved", "changes-requested")
 BLOCKER_FIELDS = ("reason", "impact", "owner", "workaround")
 APPROVAL_FIELDS = ("scope", "snapshot", "confirmation", "approvedAt")
-GATES = ["G%d" % k for k in range(1, 6)]
+GATES = CONTRACT["gates"]
 SKIP_DIRS = {".git", "node_modules", ".venv", "__pycache__"}
 EMPTY_OK = {".gitkeep", ".nojekyll", "__init__.py", "py.typed"}
 
@@ -86,6 +76,11 @@ def check_status(ws, phase, problems):
         missing = [k for k in BLOCKER_FIELDS if not (isinstance(b, dict) and b.get(k))]
         if missing:
             problems.append("project/status.json: blocker #%d missing %s" % (i, ", ".join(missing)))
+    if status.get("state") not in CONTRACT["states"]:
+        problems.append("project/status.json: state must be one of %s" % CONTRACT["states"])
+    for key in ("completed", "next"):
+        if not isinstance(status.get(key), list) or any(not isinstance(item, str) or not item.strip() for item in status.get(key, [])):
+            problems.append("project/status.json: %s must be a list of non-blank strings" % key)
 
 
 def present(record, key):
@@ -118,7 +113,7 @@ def check_approvals(ws, phase, release, problems):
                 problems.append("approval #%d (%s): approved without %s" % (i, gate, ", ".join(missing)))
                 state = "invalid"
         latest[gate] = state
-    needed = GATES[:max(phase - 1, 0)] + (["G5"] if release else [])
+    needed = CONTRACT["phases"][str(phase)]["requiresApprovals"] + (CONTRACT["releaseApprovals"] if release else [])
     for gate in needed:
         if latest.get(gate) != "approved":
             problems.append("phase %d requires gate %s approved (latest record decides)" % (phase, gate))
@@ -130,10 +125,14 @@ def check(ws, phase, release=False):
     check_files(ws, phase, problems)
     if (ws / "brand.brief.json").is_file():
         load_json(ws, "brand.brief.json", problems)
+        problems.extend("brand.brief.json: " + e for e in validate_file(ws / "brand.brief.json"))
     if (ws / "project/status.json").is_file():
         check_status(ws, phase, problems)
     if (ws / "project/approvals.json").is_file():
         check_approvals(ws, phase, release, problems)
+    review = ws / "review/01-directions.html"
+    if phase >= 1 and review.is_file():
+        problems.extend("review/01-directions.html: " + e for e in directions_check.check(review))
     return problems
 
 

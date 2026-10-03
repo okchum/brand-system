@@ -1,0 +1,104 @@
+{
+  "states": [
+    "draft",
+    "in-progress",
+    "in-review",
+    "approved",
+    "blocked",
+    "complete"
+  ],
+  "gates": [
+    "G1",
+    "G2",
+    "G3",
+    "G4",
+    "G5"
+  ],
+  "phases": {
+    "0": {
+      "required": [
+        "brand.brief.json",
+        "README.md",
+        "project/plan.md",
+        "project/status.json",
+        "project/approvals.json",
+        "project/decisions.md",
+        "project/handoff.md",
+        "docs/scope-matrix.md",
+        "docs/environment.md",
+        "docs/references.md",
+        "docs/strategy.md",
+        "docs/voice.md"
+      ],
+      "requiresApprovals": [],
+      "review": null
+    },
+    "1": {
+      "required": [
+        "review/01-directions.html"
+      ],
+      "requiresApprovals": [],
+      "review": "review/01-directions.html"
+    },
+    "2": {
+      "required": [
+        "review/02-identity.html",
+        "BRAND_SYSTEM.md",
+        "config/brand.json",
+        "docs/logo.md",
+        "docs/color.md",
+        "docs/typography.md"
+      ],
+      "requiresApprovals": [
+        "G1"
+      ],
+      "review": "review/02-identity.html"
+    },
+    "3": {
+      "required": [
+        "review/03-system.html",
+        "docs/accessibility.md",
+        "config/quality.json"
+      ],
+      "requiresApprovals": [
+        "G1",
+        "G2"
+      ],
+      "review": "review/03-system.html"
+    },
+    "4": {
+      "required": [
+        "review/04-assets.html",
+        "config/platforms.json",
+        "config/exports.json",
+        "docs/platform-specs.md",
+        "docs/licensing.md",
+        "manifests/assets.source.json"
+      ],
+      "requiresApprovals": [
+        "G1",
+        "G2",
+        "G3"
+      ],
+      "review": "review/04-assets.html"
+    },
+    "5": {
+      "required": [
+        "review/05-release.html",
+        "CHANGELOG.md",
+        "docs/handoff-by-role.md",
+        "reports/qa-report.md"
+      ],
+      "requiresApprovals": [
+        "G1",
+        "G2",
+        "G3",
+        "G4"
+      ],
+      "review": "review/05-release.html"
+    }
+  },
+  "releaseApprovals": [
+    "G5"
+  ]
+}

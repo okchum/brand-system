@@ -1,6 +1,6 @@
 # brand-system
 
-一个 agent skill：为软件产品建立生产导向的完整品牌系统仓库——策略、三套视觉方向、Logo 矢量母版、design tokens、产品 UI 规范、平台图标、营销/邮件/演示/印刷模板、自动导出、文档与 QA。分六个阶段推进，每阶段停在显式审批门。
+一个 agent skill：为软件产品建立生产导向的完整品牌系统仓库——策略、三套视觉方向、Logo 矢量母版、design tokens、产品 UI 规范、平台图标、营销/邮件/演示/印刷模板、自动导出、文档与 QA。分六个阶段推进，每阶段停在显式审批门。阶段文件清单与审批依赖以 `config/phase_requirements.json` 为唯一机器可读来源。
 
 ## 结构
 
@@ -11,6 +11,7 @@ assets/         brief 模板与 JSON Schema
 scripts/        确定性检查与单文件构建，只依赖 Python 3.9 标准库
 evals/          虚构示例 brief，用于试跑阶段 0–1
 tests/          scripts 与包结构的测试
+config/         阶段文件清单、状态值和审批依赖的机器可读契约
 ```
 
 ## 安装
@@ -51,6 +52,7 @@ python3 scripts/check_workspace.py <工作区> --phase 5 --release   # 发布前
 
 ```sh
 python3 -m unittest discover -s tests
+python3 scripts/smoke_test.py
 ```
 
 ## 试跑
