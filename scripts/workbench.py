@@ -169,7 +169,15 @@ def start_generation(path, phase):
                     add_log("已读取参考资料：%d 个文件" % len(source_files))
                 except (OSError, json.JSONDecodeError):
                     add_log("参考资料清单读取失败，继续使用工作区文件。")
-            add_log("正在生成三套视觉方向和 review/01-directions.html…", "生成方向页面")
+            phase_labels = {
+                1: ("正在生成三套视觉方向和 review/01-directions.html…", "生成方向页面"),
+                2: ("正在生成 Phase 2 核心身份和 review/02-identity.html…", "生成核心身份"),
+                3: ("正在生成 Phase 3 设计系统交付物…", "生成设计系统"),
+                4: ("正在生成 Phase 4 平台资产交付物…", "生成平台资产"),
+                5: ("正在生成 Phase 5 发布交付物…", "生成发布包"),
+            }
+            phase_message, phase_step = phase_labels[phase]
+            add_log(phase_message, phase_step)
             proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, cwd=str(path))
             selector = selectors.DefaultSelector(); selector.register(proc.stdout, selectors.EVENT_READ)
             deadline = time.time() + 600
