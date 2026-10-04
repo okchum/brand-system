@@ -61,7 +61,7 @@ description: 为一个软件产品建立生产导向的完整品牌系统仓库�
 
 ## 01. 输入与缺省处理
 
-优先读取用户已提供的资料及工作区的 `brand.brief.json`。没有时，把 `<skill>/assets/brief.template.json` 复制为工作区的 `brand.brief.json` 作为待填写版本；字段含义与类型见 `<skill>/assets/brief.schema.json`。模板里的空值不是品牌事实，不把占位当作品牌名称使用。
+优先读取用户已提供的资料及工作区的 `brand.brief.json`。没有时，优先启动 `<skill>/scripts/workbench.py` 打开浏览器工作台，由页面扫描目录并在用户选择后自动创建工作区和 `brand.brief.json`；不要求用户手工复制模板。字段含义与类型见 `<skill>/assets/brief.schema.json`。模板里的空值不是品牌事实，不把占位当作品牌名称使用。CLI/CI 环境没有浏览器时，才使用模板复制作为后备流程。
 
 至少收集：
 

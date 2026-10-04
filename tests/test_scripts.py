@@ -17,6 +17,7 @@ import icon_verify  # noqa: E402
 import svg_lint  # noqa: E402
 import directions_check  # noqa: E402
 import validate_brief  # noqa: E402
+import workbench  # noqa: E402
 
 
 def png_bytes(w, h):
@@ -409,6 +410,15 @@ class CheckWorkspaceTest(Mentions, unittest.TestCase):
 
     def test_directions_contract_requires_three_distinct_metadata_blocks(self):
         self.assertEqual(directions_check.check(ROOT / "evals/directions.fixture.html"), [])
+
+    def test_workbench_initializes_and_refuses_nonempty_directory(self):
+        with tempfile.TemporaryDirectory() as d:
+            target = Path(d) / "brand-workspace"
+            workbench.init_workspace(target, "Acme", "A product")
+            self.assertTrue((target / "brand.brief.json").is_file())
+            self.assertEqual(json.loads((target / "project/status.json").read_text())["phase"], 0)
+            with self.assertRaises(ValueError):
+                workbench.init_workspace(Path(d), "Other", "Overwrite")
 
     def test_broken_symlink_is_a_finding(self):
         with tempfile.TemporaryDirectory() as d:
