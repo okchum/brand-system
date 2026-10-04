@@ -25,9 +25,23 @@ HTML = r'''<!doctype html>
 <script>
 let current='';
 async function get(path,opts){let r=await fetch(path,opts);let j=await r.json();if(!r.ok)throw Error(j.error||'请求失败');return j}
-async function scan(){try{let j=await get('/api/scan');let el=document.querySelector('#candidates');el.innerHTML='';document.querySelector('#notice').textContent='';j.items.forEach(x=>{let d=document.createElement('div');d.className='card';d.innerHTML='<b>'+esc(x.path)+'</b><p>'+esc(x.kind)+'</p><button '+(x.workspace?'':'class="secondary"')+' onclick="selectPath('+JSON.stringify(x.path)+','+x.workspace+')">'+(x.workspace?'继续此工作区':'选择此目录')+'</button>';el.appendChild(d)});if(!j.items.length)el.innerHTML='<p class="muted">当前目录为空，可以直接在根目录创建工作区。</p>'}catch(e){document.querySelector('#notice').textContent='工作台连接失败：'+e.message+'。请确认 workbench.py 仍在运行。'}}
+let recommended='';
+async function scan(){try{
+ const j=await get('/api/scan'); recommended=j.recommended;
+ const el=document.querySelector('#candidates');el.replaceChildren();document.querySelector('#notice').textContent='';
+ const add=(path,title,description,label,action)=>{
+  const card=document.createElement('div');card.className='card';
+  const heading=document.createElement('b');heading.textContent=title;
+  const details=document.createElement('p');details.textContent=description;
+  const location=document.createElement('p');location.className='muted';location.textContent=path;
+  const button=document.createElement('button');button.textContent=label;button.addEventListener('click',action);
+  card.append(heading,details,location,button);el.appendChild(card);
+ };
+ add(recommended,'创建新文件夹（推荐）','将品牌文件集中保存在独立文件夹中，名称和路径可以修改。','创建新文件夹',()=>openForm(recommended));
+ j.items.forEach(x=>add(x.path,x.kind,'',x.workspace?'继续此工作区':'选择此目录',()=>selectPath(x.path,x.workspace)));
+}catch(e){document.querySelector('#notice').textContent='工作台连接失败：'+e.message+'。请确认 workbench.py 仍在运行。'}}
 function selectPath(p,existing){if(existing){current=p;document.querySelector('#scan').classList.add('hidden');document.querySelector('#workspace').classList.remove('hidden');loadState()}else{openForm(p)}}
-function openForm(p){document.querySelector('#scan').classList.add('hidden');document.querySelector('#workspace').classList.add('hidden');document.querySelector('#form').classList.remove('hidden');document.querySelector('#path').value=p||'';document.querySelector('#target').textContent=p?'将在此目录创建品牌工作区。':'请选择一个目录或输入新子目录路径。'}
+function openForm(p){document.querySelector('#scan').classList.add('hidden');document.querySelector('#workspace').classList.add('hidden');document.querySelector('#form').classList.remove('hidden');document.querySelector('#path').value=p||recommended;document.querySelector('#target').textContent=p?'将在此目录创建品牌工作区。':'请选择一个目录或输入新子目录路径。'}
 async function initWorkspace(){let body={path:document.querySelector('#path').value,official:document.querySelector('#official').value,oneLiner:document.querySelector('#oneLiner').value};try{let j=await get('/api/init',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});current=j.path;document.querySelector('#form').classList.add('hidden');document.querySelector('#workspace').classList.remove('hidden');await loadState();document.querySelector('#result').textContent='已创建';}catch(e){document.querySelector('#result').className='error';document.querySelector('#result').textContent=e.message}}
 async function loadState(){let j=await get('/api/state?path='+encodeURIComponent(current));document.querySelector('#state').innerHTML='<div class="card"><b>'+esc(j.path)+'</b><br>阶段 '+j.phase+' · '+esc(j.state)+'<br>下一步：'+esc((j.next||[]).join('、')||'填写 brief 并生成方向审阅页')+'</div>'}
 async function checkWorkspace(){try{let j=await get('/api/check?path='+encodeURIComponent(current));document.querySelector('#check').className=j.ok?'ok':'error';document.querySelector('#check').textContent=j.output}catch(e){document.querySelector('#check').textContent=e.message}}
@@ -37,6 +51,15 @@ function esc(s){return String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;',
 
 def is_workspace(path):
     return (path / "brand.brief.json").is_file() and (path / "project" / "status.json").is_file()
+
+
+def recommended_folder(root):
+    target = root / "brand-workspace"
+    suffix = 2
+    while target.exists():
+        target = root / ("brand-workspace-%d" % suffix)
+        suffix += 1
+    return target
 
 
 def candidates(root):
@@ -95,7 +118,7 @@ class Handler(BaseHTTPRequestHandler):
                 data = HTML.encode(); self.send_response(200); self.send_header("Content-Type", "text/html; charset=utf-8"); self.send_header("Content-Length", str(len(data))); self.end_headers(); self.wfile.write(data); return
             from urllib.parse import parse_qs
             q = parse_qs(parsed.query)
-            if parsed.path == "/api/scan": return self.send_json({"items": candidates(self.root)})
+            if parsed.path == "/api/scan": return self.send_json({"items": candidates(self.root), "recommended": str(recommended_folder(self.root))})
             path = Path(q.get("path", [""])[0]).expanduser().resolve()
             if not path.is_relative_to(self.root.parent): raise ValueError("路径必须位于启动目录或其子目录")
             if parsed.path == "/api/state":
