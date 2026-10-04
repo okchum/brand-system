@@ -9,6 +9,7 @@ import os
 import threading
 import time
 import subprocess
+import selectors
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlparse
@@ -44,7 +45,7 @@ function renderPhases(currentPhase){activePhase=currentPhase;const names=['发�
 async function loadState(){if(!current)return;try{const j=await get('/api/state?path='+encodeURIComponent(current));const phase=Number(j.phase);$('#state').innerHTML='<div class="card"><b>'+esc(j.path)+'</b><br>阶段 '+phase+' · '+esc(j.state)+'<br>下一步：'+esc(phaseInstruction(phase))+'</div>';renderPhases(phase);updateUrl(phase,true);log('当前进度：阶段 '+phase+' · '+j.state,phase)}catch(e){$('#state').textContent=e.message}}
 let activeJob='',activeJobPhase=0;
 async function generatePhase(){if(!current||activePhase<1||activePhase>5)return;const b=$(activePhase===1?'#generateButton':'#progressButton');if(b){b.disabled=true;b.setAttribute('aria-busy','true');b.textContent='正在生成 Phase '+activePhase+'…'}log('正在启动 Phase '+activePhase+' 生成任务…',activePhase);try{const j=await get('/api/generate',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({path:current,phase:activePhase})});activeJob=j.job;activeJobPhase=activePhase;pollJob()}catch(e){if(b){b.disabled=false;b.removeAttribute('aria-busy');b.textContent='重新生成 Phase '+activePhase}log('生成启动失败：'+e.message,activePhase)}}
-async function pollJob(){if(!activeJob)return;try{const j=await get('/api/job?id='+encodeURIComponent(activeJob));const status=$('#phaseJobStatus');if(status){const age=Math.max(0,Math.round((Date.now()/1000-j.updatedAt)));status.textContent=j.status==='running'?(age>120?'可能无响应：当前步骤 '+(j.step||'处理中')+'，最后更新 '+age+' 秒前':'当前步骤：'+(j.step||'处理中')+' · 最近更新 '+age+' 秒前'):(j.status==='done'?'任务已完成，可以检查。':'任务失败：'+(j.error||'未知错误'))}if(j.logs&&j.logs.length){phaseLogs[activeJobPhase]=j.logs.slice();const box=$('#phaseLog-'+activeJobPhase);if(box){const next=phaseLogs[activeJobPhase].join('\n');const previous=box.textContent;const follow=box.scrollTop+box.clientHeight>=box.scrollHeight-8;if(next!==previous){if(previous&&next.startsWith(previous)){box.append(document.createTextNode(next.slice(previous.length)))}else{box.textContent=next}}if(follow)box.scrollTop=box.scrollHeight}}if(j.status==='running'){setTimeout(pollJob,700);return}const b=$(activeJobPhase===1?'#generateButton':'#progressButton');if(b){b.disabled=false;b.removeAttribute('aria-busy');if(j.status!=='done')b.textContent='重新生成 Phase '+activeJobPhase}if(j.status==='done'&&activeJobPhase===1){const gate=$('#reviewGate');if(gate)gate.hidden=false;if(b){b.disabled=true;b.textContent='Phase 1 方向已生成'}}if(j.status==='done'&&activeJobPhase!==1&&b)b.textContent='检查并进入 Phase '+(activeJobPhase+1);if(j.status==='done')log('生成完成，可以查看方案并继续。',activeJobPhase);else log('生成任务失败：'+(j.error||'请查看日志。'),activeJobPhase)}catch(e){log('读取生成进度失败：'+e.message,activeJobPhase)}}
+async function pollJob(){if(!activeJob)return;try{const j=await get('/api/job?id='+encodeURIComponent(activeJob));const status=$('#phaseJobStatus');if(status){const age=Math.max(0,Math.round((Date.now()/1000-j.updatedAt)));status.textContent=j.status==='running'?(age>120?'可能无响应：当前步骤 '+(j.step||'处理中')+'，最后更新 '+age+' 秒前':'当前步骤：'+(j.step||'处理中')+' · 最近更新 '+age+' 秒前'):(j.status==='done'?'任务已完成，可以检查。':'任务失败：'+(j.error||'未知错误'))}if(j.logs&&j.logs.length){phaseLogs[activeJobPhase]=j.logs.slice();const box=$('#phaseLog-'+activeJobPhase);if(box){const next=phaseLogs[activeJobPhase].join('\n');const previous=box.textContent;const follow=box.scrollTop+box.clientHeight>=box.scrollHeight-8;if(next!==previous){if(previous&&next.startsWith(previous)){box.append(document.createTextNode(next.slice(previous.length)))}else{box.textContent=next}}if(follow)box.scrollTop=box.scrollHeight}}if(j.status==='running'){setTimeout(pollJob,700);return}const b=$(activeJobPhase===1?'#generateButton':'#progressButton');if(b){b.disabled=false;b.removeAttribute('aria-busy');if(j.status!=='done')b.textContent='重新生成 Phase '+activeJobPhase}if(j.status==='done'&&activeJobPhase===1){const gate=$('#reviewGate');if(gate)gate.hidden=false;if(b){b.disabled=true;b.textContent='Phase 1 方向已生成'}}if(j.status==='done'&&activeJobPhase!==1&&b)b.textContent='检查并进入 Phase '+(activeJobPhase+1);if(j.status==='done')log('生成完成，可以查看方案并继续。',activeJobPhase);else log('生成任务失败：'+(j.error||'请查看日志。'),activeJobPhase)}catch(e){if(e.message&&e.message.indexOf('任务不存在')>=0){const b=$(activeJobPhase===1?'#generateButton':'#progressButton');if(b){b.disabled=false;b.removeAttribute('aria-busy');b.textContent='重新生成 Phase '+activeJobPhase}activeJob='';const status=$('#phaseJobStatus');if(status)status.textContent='任务状态已丢失，请重新生成。';log('生成任务状态已丢失，请重新生成。',activeJobPhase)}else{log('读取生成进度失败：'+e.message,activeJobPhase)}}}
 async function approveHistory(){const choice=$('#historyDirectionChoice')?.value||'A';try{await get('/api/approve',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({path:current,gate:'G1',choice})});log('已补录 G1 审批：选择方向 '+choice+'。',1);const b=$('#approveHistoryButton');if(b)b.disabled=true}catch(e){log('G1 补录失败：'+e.message,1)}}
 async function approveProgress(){try{await approveG1();return checkWorkspace()}catch(e){log('G1 审批失败：'+e.message,1)}}
 async function approveG1(){const choice=$('#directionChoice')?.value||'A';await get('/api/approve',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({path:current,gate:'G1',choice})});log('已记录 G1 审批：选择方向 '+choice+'。',1)}
@@ -170,17 +171,24 @@ def start_generation(path, phase):
                     add_log("参考资料清单读取失败，继续使用工作区文件。")
             add_log("正在生成三套视觉方向和 review/01-directions.html…", "生成方向页面")
             proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, cwd=str(path))
-            for line in proc.stdout:
-                if not line.strip():
-                    continue
-                try:
-                    event = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                if event.get("type") == "item.completed":
-                    item = event.get("item", {})
-                    # 工具内部事件不逐条展示；关键阶段由明确的日志节点记录。
-                    continue
+            selector = selectors.DefaultSelector(); selector.register(proc.stdout, selectors.EVENT_READ)
+            deadline = time.time() + 600
+            while True:
+                if time.time() > deadline:
+                    proc.kill()
+                    raise TimeoutError("生成任务超过 10 分钟未完成，已停止；可以重新生成")
+                ready = selector.select(timeout=1)
+                if ready:
+                    line = proc.stdout.readline()
+                    if not line:
+                        break
+                    try:
+                        json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                elif proc.poll() is not None:
+                    break
+            selector.close()
             code = proc.wait()
             if code == 0:
                 generated = sorted(item for item in path.rglob("*") if item.is_file() and ".git" not in item.parts)
