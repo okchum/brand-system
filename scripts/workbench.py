@@ -142,7 +142,7 @@ def start_generation(path, phase):
     job_id = str(int(time.time() * 1000))
     requirements = json.loads((ROOT / "config/phase_requirements.json").read_text(encoding="utf-8"))["phases"][str(phase)]["required"]
     deliverables = "、".join(requirements)
-    prompt = f"""在当前品牌工作区完成 Phase {phase} 交付。只写入当前工作区目录，不修改技能仓库或其他目录。读取 brand.brief.json、review/、docs/、project/ 和 config/ 中现有资料；如有 source.json，读取其中列出的参考资料。创建并验证本阶段必需文件：{deliverables}。保持方向选择、审批和暂定假设可追溯，不把未确认内容写成最终事实。同步更新 project/status.json 为 phase {phase}、state in-review，并保存 reports/phase-{phase}-check.txt。不要只解释，直接创建文件。"""
+    prompt = f"""在当前品牌工作区完成 Phase {phase} 交付。只写入当前工作区目录，不修改技能仓库或其他目录。读取 brand.brief.json、review/、docs/、project/ 和 config/ 中现有资料；如有 source.json，读取其中列出的参考资料。创建并验证本阶段必需文件：{deliverables}。保持方向选择、审批和暂定假设可追溯，不把未确认内容写成最终事实。确保每张方向卡片的 hero 标题、描述和图标有独立空间，文字与图标不能重叠，并检查浅色与深色背景下的对比度。同步更新 project/status.json 为 phase {phase}、state in-review，并保存 reports/phase-{phase}-check.txt。不要只解释，直接创建文件。"""
     with JOBS_LOCK:
         JOBS[job_id] = {"status": "running", "logs": [], "error": "", "updatedAt": time.time(), "step": "读取工作区资料"}
     def add_log(message, step=None):
