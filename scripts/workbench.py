@@ -40,15 +40,17 @@ async function checkSourcePath(){const value=$('#sourcePath').value.trim();if(!v
 function phaseInstruction(phase){return ['先补全 brief、环境、策略和范围文件，再检查进入 Phase 1。','先点击“生成 Phase 1 方向”，等待日志完成，再检查进入 Phase 2。','先完成 Logo、颜色、字体和身份规范，再检查进入下一阶段。','先完成 tokens、组件和无障碍规范，再检查进入下一阶段。','先完成平台资产、图标和导出清单，再检查进入下一阶段。','先完成 QA、交接和发布包，再检查发布候选。'][phase]||'先完成当前阶段标注的交付物，再重新检查。'}
 function updateUrl(phase,replace=false){const u=new URL(location.href);u.searchParams.set('workspace',current);u.searchParams.set('phase',String(phase));(replace?history.replaceState:history.pushState).call(history,{},'',u)}
 async function initWorkspace(){const output=$('#outputPath').value,source=$('#sourcePath').value.trim(),existing=$('#outputPath').dataset.workspace==='true';const capabilities=$('#capabilities').value.split(/[,，]/).map(x=>x.trim()).filter(Boolean);try{if(existing){current=output;await loadState();log('已打开已有品牌工作区。',activePhase);return}log('开始初始化，生成目录：'+output,0);if(source)log('将读取参考资料：'+source,0);const j=await get('/api/init',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({path:output,official:$('#official').value,oneLiner:$('#oneLiner').value,capabilities,sourcePath:source})});current=j.path;updateUrl(0);log('已写入阶段 0 文件。',0);await loadState()}catch(e){$('#result').className='error';$('#result').textContent=e.message;log('初始化失败：'+e.message,0)}}
-function renderPhases(currentPhase){activePhase=currentPhase;const names=['发现与计划','三套方向','品牌身份','设计系统','资产与平台','交付与发布'];const desc=['完善 brief、环境、策略和范围。','生成三套真正不同的方向并准备 G1。','完成 Logo、颜色、字体和身份规范。','完成 tokens、组件和无障碍规范。','生成平台资产、图标和导出清单。','完成 QA、交接和发布包。'];const box=$('#phases');box.replaceChildren();for(let i=0;i<6;i++){const panel=document.createElement('section');panel.className='phase '+(i===currentPhase?'current':'');const header=document.createElement('button');header.className='phase-header';header.textContent=(i<currentPhase?'✓ ':i===currentPhase?'● ':'🔒 ')+'Phase '+i+' · '+names[i]+' · '+desc[i];header.disabled=i>currentPhase;const body=document.createElement('div');body.className='phase-body';const actions=i===currentPhase&&i<5?((i===1?'<button id="generateButton">生成 Phase 1 方向</button>':'')+'<button id="checkButton">检查并进入 Phase '+(i+1)+'</button><pre id="phaseCheck-'+i+'" class="phase-check"></pre>'):'';body.innerHTML='<p class="muted">'+(i<currentPhase?'已完成，可点击标题回看。':i===currentPhase?'当前阶段，完成检查后进入下一阶段。':'尚未到达，完成前置阶段后解锁。')+'</p>'+actions+'<h4>Phase '+i+' 活动日志</h4><div id="phaseLog-'+i+'" class="phase-log" aria-live="polite">'+phaseLogs[i].join('\n')+'</div>';if(i!==currentPhase)body.hidden=true;header.addEventListener('click',()=>{if(i<=currentPhase)body.hidden=!body.hidden});panel.append(header,body);box.appendChild(panel)}}
+function renderPhases(currentPhase){activePhase=currentPhase;const names=['发现与计划','三套方向','品牌身份','设计系统','资产与平台','交付与发布'];const desc=['完善 brief、环境、策略和范围。','生成三套真正不同的方向并准备 G1。','完成 Logo、颜色、字体和身份规范。','完成 tokens、组件和无障碍规范。','生成平台资产、图标和导出清单。','完成 QA、交接和发布包。'];const box=$('#phases');box.replaceChildren();for(let i=0;i<6;i++){const panel=document.createElement('section');panel.className='phase '+(i===currentPhase?'current':'');const header=document.createElement('button');header.className='phase-header';header.textContent=(i<currentPhase?'✓ ':i===currentPhase?'● ':'🔒 ')+'Phase '+i+' · '+names[i]+' · '+desc[i];header.disabled=i>currentPhase;const body=document.createElement('div');body.className='phase-body';const actions=i===currentPhase&&i<5?((i===1?'<label class="direction-choice">G1 选择方向 <select id="directionChoice"><option value="A">A</option><option value="B">B</option><option value="C">C</option></select></label>':'')+'<button id="progressButton">'+(i===1?'生成并检查 Phase 1 → Phase 2':i===2?'生成并检查 Phase 2 → Phase 3':'检查并进入 Phase '+(i+1))+'</button><pre id="phaseCheck-'+i+'" class="phase-check"></pre>'):'';body.innerHTML='<p class="muted">'+(i<currentPhase?'已完成，可点击标题回看。':i===currentPhase?'当前阶段，完成检查后进入下一阶段。':'尚未到达，完成前置阶段后解锁。')+'</p>'+(i===1||i===2?'<p id=\"phaseJobStatus\" class=\"muted\" aria-live=\"polite\"></p>':'')+actions+'<h4>Phase '+i+' 活动日志</h4>'<div id="phaseLog-'+i+'" class="phase-log" aria-live="polite">'+phaseLogs[i].join('\n')+'</div>';if(i!==currentPhase)body.hidden=true;header.addEventListener('click',()=>{if(i<=currentPhase)body.hidden=!body.hidden});panel.append(header,body);box.appendChild(panel)}}
 async function loadState(){if(!current)return;try{const j=await get('/api/state?path='+encodeURIComponent(current));const phase=Number(j.phase);$('#state').innerHTML='<div class="card"><b>'+esc(j.path)+'</b><br>阶段 '+phase+' · '+esc(j.state)+'<br>下一步：'+esc(phaseInstruction(phase))+'</div>';renderPhases(phase);updateUrl(phase,true);log('当前进度：阶段 '+phase+' · '+j.state,phase)}catch(e){$('#state').textContent=e.message}}
-let activeJob='';
-async function generatePhase(){if(!current||activePhase!==1)return;const b=$('#generateButton');b.disabled=true;log('正在启动 Phase 1 生成任务…',1);try{const j=await get('/api/generate',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({path:current,phase:1})});activeJob=j.job;pollJob()}catch(e){b.disabled=false;log('生成启动失败：'+e.message,1)}}
-async function pollJob(){if(!activeJob)return;try{const j=await get('/api/job?id='+encodeURIComponent(activeJob));const status=$('#phaseJobStatus');if(status){const age=Math.max(0,Math.round((Date.now()/1000-j.updatedAt)));status.textContent=j.status==='running'?(age>120?'可能无响应：当前步骤 '+(j.step||'处理中')+'，最后更新 '+age+' 秒前':'当前步骤：'+(j.step||'处理中')+' · 最近更新 '+age+' 秒前'):(j.status==='done'?'任务已完成，可以检查。':'任务失败：'+(j.error||'未知错误'))}if(j.logs&&j.logs.length){phaseLogs[1]=j.logs.slice();const box=$('#phaseLog-1');if(box){box.textContent=phaseLogs[1].join('\n');box.scrollTop=box.scrollHeight}}if(j.status==='running'){setTimeout(pollJob,700);return}const b=$('#generateButton');if(b)b.disabled=j.status==='done';if(j.status==='done')log('生成完成，可以运行检查。',1);else log('生成任务失败：'+(j.error||'请查看日志。'),1)}catch(e){log('读取生成进度失败：'+e.message,1)}}
+let activeJob='',activeJobPhase=0;
+async function generatePhase(){if(!current||activePhase<1||activePhase>2)return;const b=$('#progressButton');if(b)b.disabled=true;log('正在启动 Phase '+activePhase+' 生成任务…',activePhase);try{const j=await get('/api/generate',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({path:current,phase:activePhase})});activeJob=j.job;activeJobPhase=activePhase;pollJob()}catch(e){if(b)b.disabled=false;log('生成启动失败：'+e.message,activePhase)}}
+async function pollJob(){if(!activeJob)return;try{const j=await get('/api/job?id='+encodeURIComponent(activeJob));const status=$('#phaseJobStatus');if(status){const age=Math.max(0,Math.round((Date.now()/1000-j.updatedAt)));status.textContent=j.status==='running'?(age>120?'可能无响应：当前步骤 '+(j.step||'处理中')+'，最后更新 '+age+' 秒前':'当前步骤：'+(j.step||'处理中')+' · 最近更新 '+age+' 秒前'):(j.status==='done'?'任务已完成，可以检查。':'任务失败：'+(j.error||'未知错误'))}if(j.logs&&j.logs.length){phaseLogs[activeJobPhase]=j.logs.slice();const box=$('#phaseLog-'+activeJobPhase);if(box){box.textContent=phaseLogs[activeJobPhase].join('\n');box.scrollTop=box.scrollHeight}}if(j.status==='running'){setTimeout(pollJob,700);return}const b=$('#progressButton');if(b){b.disabled=false;b.textContent=j.status==='done'?'检查并进入 Phase '+(activeJobPhase+1):'重新生成 Phase '+activeJobPhase}if(j.status==='done')log('生成完成，可以运行检查。',activeJobPhase);else log('生成任务失败：'+(j.error||'请查看日志。'),activeJobPhase)}catch(e){log('读取生成进度失败：'+e.message,activeJobPhase)}}
+async function approveG1(){const choice=$('#directionChoice')?.value||'A';await get('/api/approve',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({path:current,gate:'G1',choice})});log('已记录 G1 审批：选择方向 '+choice+'。',1)}
+async function progressAction(){const button=$('#progressButton');if(activeJob&&activeJobPhase===activePhase&&button&&button.textContent.indexOf('检查')===0){if(activePhase===1){try{await approveG1()}catch(e){log('G1 审批失败：'+e.message,1);return}}return checkWorkspace()}if(activePhase<=2&&activePhase>=1){activeJob='';return generatePhase()}return checkWorkspace()}
 async function checkWorkspace(){if(!current)return;const output=$('#phaseCheck-'+activePhase);try{log('正在检查当前 Phase 并准备推进…',activePhase);const j=await get('/api/check?path='+encodeURIComponent(current));if(!j.ok){output.className='error';output.textContent=j.output.trim()+'\n\n下一步：'+phaseInstruction(activePhase);log('当前 Phase 未通过：'+phaseInstruction(activePhase),activePhase);return}await advancePhase()}catch(e){output.className='error';output.textContent=e.message;log('检查失败：'+e.message,activePhase)}}
 async function advancePhase(){const s=await get('/api/state?path='+encodeURIComponent(current));await get('/api/advance',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({path:current,fromPhase:Number(s.phase)})});log('已进入 Phase '+(Number(s.phase)+1)+'。',activePhase);await loadState()}
 function esc(s){return String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
-$('#chooseOutputButton').addEventListener('click',()=>openChooser('output'));$('#chooseSourceButton').addEventListener('click',()=>openChooser('source'));$('#cancelChooser').addEventListener('click',()=>dialog.close());$('#confirmChooser').addEventListener('click',confirmChooser);$('#initButton').addEventListener('click',initWorkspace);$('#phases').addEventListener('click',event=>{if(event.target.id==='checkButton')checkWorkspace();if(event.target.id==='generateButton')generatePhase()});window.addEventListener('popstate',()=>{const p=new URL(location.href).searchParams.get('workspace');current=p||'';if(current)loadState()});scan();const initial=new URL(location.href).searchParams.get('workspace');if(initial){current=initial;loadState()}
+$('#chooseOutputButton').addEventListener('click',()=>openChooser('output'));$('#chooseSourceButton').addEventListener('click',()=>openChooser('source'));$('#cancelChooser').addEventListener('click',()=>dialog.close());$('#confirmChooser').addEventListener('click',confirmChooser);$('#initButton').addEventListener('click',initWorkspace);$('#phases').addEventListener('click',event=>{if(event.target.id==='progressButton')progressAction()});window.addEventListener('popstate',()=>{const p=new URL(location.href).searchParams.get('workspace');current=p||'';if(current)loadState()});scan();const initial=new URL(location.href).searchParams.get('workspace');if(initial){current=initial;loadState()}
 </script></body></html>'''
 
 
@@ -133,9 +135,9 @@ def init_workspace(path, official, one_liner, source_path=None, capabilities=Non
 JOBS = {}
 JOBS_LOCK = threading.Lock()
 
-def start_generation(path):
+def start_generation(path, phase):
     job_id = str(int(time.time() * 1000))
-    prompt = """在当前品牌工作区完成 Phase 1 方向生成。只写入当前工作区目录，不修改技能仓库或其他目录。读取 brand.brief.json、docs/ 和 project/ 中现有资料；如有 source.json，读取其中列出的参考资料。生成并验证 review/01-directions.html，页面必须包含恰好三套真正不同的视觉方向，并满足当前 brand-system skill 和 scripts/check_workspace.py 的要求。同步更新 project/status.json 为 phase 1、state in-review，并保存 reports/phase-1-check.txt。不要只解释，直接创建文件。"""
+    prompt = ("""在当前品牌工作区完成 Phase 1 方向生成。只写入当前工作区目录，不修改技能仓库或其他目录。读取 brand.brief.json、docs/ 和 project/ 中现有资料；如有 source.json，读取其中列出的参考资料。生成并验证 review/01-directions.html，页面必须包含恰好三套真正不同的视觉方向，并满足当前 brand-system skill 和 scripts/check_workspace.py 的要求。同步更新 project/status.json 为 phase 1、state in-review，并保存 reports/phase-1-check.txt。不要只解释，直接创建文件。""" if phase == 1 else """在当前品牌工作区完成 Phase 2 核心身份交付。只写入当前工作区目录，不修改技能仓库或其他目录。读取 brand.brief.json、review/01-directions.html、project/approvals.json、docs/ 和 project/ 中现有资料。生成并验证 review/02-identity.html、BRAND_SYSTEM.md、config/brand.json、docs/logo.md、docs/color.md、docs/typography.md；保持方向选择和暂定假设可追溯，不把未确认内容写成最终事实。同步更新 project/status.json 为 phase 2、state in-review，并保存 reports/phase-2-check.txt。不要只解释，直接创建文件。""")
     with JOBS_LOCK:
         JOBS[job_id] = {"status": "running", "logs": [], "error": "", "updatedAt": time.time(), "step": "读取工作区资料"}
     def add_log(message, step=None):
@@ -182,7 +184,7 @@ def start_generation(path):
                     if item not in workspace_files:
                         add_log("已生成：" + str(item.relative_to(path)))
                 add_log("正在运行检查和文件验证…", "运行 Phase 1 检查")
-                check = subprocess.run(["python3", str(ROOT / "scripts/check_workspace.py"), str(path), "--phase", "1"], capture_output=True, text=True)
+                check = subprocess.run(["python3", str(ROOT / "scripts/check_workspace.py"), str(path), "--phase", str(phase)], capture_output=True, text=True)
                 result = (check.stdout + check.stderr).strip()
                 add_log("检查结果：" + (result or "无输出"))
                 with JOBS_LOCK:
@@ -244,15 +246,33 @@ class Handler(BaseHTTPRequestHandler):
         except Exception as exc: self.send_json({"error": str(exc)}, 400)
     def do_POST(self):
         endpoint = urlparse(self.path).path
-        if endpoint not in {"/api/init", "/api/advance", "/api/generate"}: return self.send_json({"error": "not found"}, 404)
+        if endpoint not in {"/api/init", "/api/advance", "/api/generate", "/api/approve"}: return self.send_json({"error": "not found"}, 404)
         try:
             body = json.loads(self.rfile.read(int(self.headers.get("Content-Length", "0"))))
+            if endpoint == "/api/approve":
+                path = self.workspace_path(body.get("path", ""))
+                if body.get("gate") != "G1" or body.get("choice") not in ("A", "B", "C"):
+                    raise ValueError("G1 必须选择 A、B 或 C 方向")
+                status = json.loads((path / "project/status.json").read_text(encoding="utf-8"))
+                if int(status.get("phase", -1)) != 1:
+                    raise ValueError("只有 Phase 1 可以记录 G1 选择")
+                approvals_path = path / "project/approvals.json"
+                records = json.loads(approvals_path.read_text(encoding="utf-8"))
+                records.append({"gate":"G1","status":"approved","scope":"Phase 1 strategy and selected visual direction","snapshot":"direction-%s" % body["choice"],"confirmation":"用户在工作台选择方向 %s 并确认 G1" % body["choice"],"approvedAt":time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),"version":"workbench-g1-%d" % int(time.time())})
+                approvals_path.write_text(json.dumps(records, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+                return self.send_json({"ok": True, "choice": body["choice"]})
             if endpoint == "/api/generate":
                 path = self.workspace_path(body.get("path", ""))
                 status = json.loads((path / "project/status.json").read_text(encoding="utf-8"))
-                if int(status.get("phase", -1)) != 1:
-                    raise ValueError("只有当前处于 Phase 1 时才能生成方向")
-                job_id = start_generation(path)
+                phase = int(body.get("phase", -1))
+                if int(status.get("phase", -1)) != phase or phase not in (1, 2):
+                    raise ValueError("只能为当前 Phase 1 或 Phase 2 生成交付物")
+                if phase == 2:
+                    records = json.loads((path / "project/approvals.json").read_text(encoding="utf-8"))
+                    latest = {item.get("gate"): item.get("status") for item in records if isinstance(item, dict)}
+                    if latest.get("G1") != "approved":
+                        raise ValueError("Phase 2 生成前必须先完成 G1 审批并选择方向")
+                job_id = start_generation(path, phase)
                 return self.send_json({"job": job_id})
             if endpoint == "/api/advance":
                 path = self.workspace_path(body.get("path", ""))
@@ -263,6 +283,11 @@ class Handler(BaseHTTPRequestHandler):
                     raise ValueError("工作区阶段已经变化，请刷新后重试")
                 if phase >= 5:
                     raise ValueError("已经是最后阶段")
+                if phase == 1:
+                    records = json.loads((path / "project/approvals.json").read_text(encoding="utf-8"))
+                    latest = {item.get("gate"): item.get("status") for item in records if isinstance(item, dict)}
+                    if latest.get("G1") != "approved":
+                        raise ValueError("Phase 1 已生成方向，但不能进入 Phase 2：请先完成 G1 审批并选择 A/B/C 方向")
                 import subprocess, sys
                 check = subprocess.run([sys.executable, str(ROOT / "scripts/check_workspace.py"), str(path), "--phase", str(phase)], capture_output=True, text=True)
                 if check.returncode != 0:
