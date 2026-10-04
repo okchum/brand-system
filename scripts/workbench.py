@@ -174,9 +174,7 @@ def start_generation(path):
                     kind = item.get("type")
                     message = {"command_execution": "正在运行检查和文件验证…", "file_change": "已写入生成文件。"}.get(kind)
                     if message:
-                        with JOBS_LOCK:
-                            if message not in JOBS[job_id]["logs"]:
-                                JOBS[job_id]["logs"].append(message)
+                        add_log(message, "运行生成工具" if kind == "file_change" else "运行检查和文件验证")
             code = proc.wait()
             if code == 0:
                 generated = sorted(item for item in path.rglob("*") if item.is_file() and ".git" not in item.parts)
