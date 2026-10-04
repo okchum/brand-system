@@ -44,7 +44,7 @@ function renderPhases(currentPhase){activePhase=currentPhase;const names=['发�
 async function loadState(){if(!current)return;try{const j=await get('/api/state?path='+encodeURIComponent(current));const phase=Number(j.phase);$('#state').innerHTML='<div class="card"><b>'+esc(j.path)+'</b><br>阶段 '+phase+' · '+esc(j.state)+'<br>下一步：'+esc(phaseInstruction(phase))+'</div>';renderPhases(phase);updateUrl(phase,true);log('当前进度：阶段 '+phase+' · '+j.state,phase)}catch(e){$('#state').textContent=e.message}}
 let activeJob='';
 async function generatePhase(){if(!current||activePhase!==1)return;const b=$('#generateButton');b.disabled=true;log('正在启动 Phase 1 生成任务…',1);try{const j=await get('/api/generate',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({path:current,phase:1})});activeJob=j.job;pollJob()}catch(e){b.disabled=false;log('生成启动失败：'+e.message,1)}}
-async function pollJob(){if(!activeJob)return;try{const j=await get('/api/job?id='+encodeURIComponent(activeJob));if(j.logs&&j.logs.length){phaseLogs[1]=j.logs.slice();const box=$('#phaseLog-1');if(box){box.textContent=phaseLogs[1].join('\n');box.scrollTop=box.scrollHeight}}if(j.status==='running'){setTimeout(pollJob,700);return}const b=$('#generateButton');if(b)b.disabled=j.status==='done';if(j.status==='done')log('生成完成，可以运行检查。',1);else log('生成任务失败：'+(j.error||'请查看日志。'),1)}catch(e){log('读取生成进度失败：'+e.message,1)}}
+async function pollJob(){if(!activeJob)return;try{const j=await get('/api/job?id='+encodeURIComponent(activeJob));const status=$('#phaseJobStatus');if(status){const age=Math.max(0,Math.round((Date.now()/1000-j.updatedAt)));status.textContent=j.status==='running'?'当前步骤：'+(j.step||'处理中')+' · 最近更新 '+age+' 秒前':(j.status==='done'?'任务已完成，可以检查。':'任务失败：'+(j.error||'未知错误'))}if(j.logs&&j.logs.length){phaseLogs[1]=j.logs.slice();const box=$('#phaseLog-1');if(box){box.textContent=phaseLogs[1].join('\n');box.scrollTop=box.scrollHeight}}if(j.status==='running'){setTimeout(pollJob,700);return}const b=$('#generateButton');if(b)b.disabled=j.status==='done';if(j.status==='done')log('生成完成，可以运行检查。',1);else log('生成任务失败：'+(j.error||'请查看日志。'),1)}catch(e){log('读取生成进度失败：'+e.message,1)}}
 async function checkWorkspace(){if(!current)return;const output=$('#phaseCheck-'+activePhase);try{log('正在检查当前 Phase 并准备推进…',activePhase);const j=await get('/api/check?path='+encodeURIComponent(current));if(!j.ok){output.className='error';output.textContent=j.output.trim()+'\n\n下一步：'+phaseInstruction(activePhase);log('当前 Phase 未通过：'+phaseInstruction(activePhase),activePhase);return}await advancePhase()}catch(e){output.className='error';output.textContent=e.message;log('检查失败：'+e.message,activePhase)}}
 async function advancePhase(){const s=await get('/api/state?path='+encodeURIComponent(current));await get('/api/advance',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({path:current,fromPhase:Number(s.phase)})});log('已进入 Phase '+(Number(s.phase)+1)+'。',activePhase);await loadState()}
 function esc(s){return String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
@@ -137,12 +137,30 @@ def start_generation(path):
     job_id = str(int(time.time() * 1000))
     prompt = """在当前品牌工作区完成 Phase 1 方向生成。只写入当前工作区目录，不修改技能仓库或其他目录。读取 brand.brief.json、docs/ 和 project/ 中现有资料；如有 source.json，读取其中列出的参考资料。生成并验证 review/01-directions.html，页面必须包含恰好三套真正不同的视觉方向，并满足当前 brand-system skill 和 scripts/check_workspace.py 的要求。同步更新 project/status.json 为 phase 1、state in-review，并保存 reports/phase-1-check.txt。不要只解释，直接创建文件。"""
     with JOBS_LOCK:
-        JOBS[job_id] = {"status": "running", "logs": ["正在读取工作区资料…"], "error": ""}
+        JOBS[job_id] = {"status": "running", "logs": [], "error": "", "updatedAt": time.time(), "step": "读取工作区资料"}
+    def add_log(message, step=None):
+        stamp = time.strftime("%H:%M:%S")
+        with JOBS_LOCK:
+            JOBS[job_id]["logs"].append("[" + stamp + "] " + message)
+            JOBS[job_id]["updatedAt"] = time.time()
+            if step:
+                JOBS[job_id]["step"] = step
     def run():
         cmd = ["codex", "exec", "--ephemeral", "--skip-git-repo-check", "-s", "danger-full-access", "-C", str(path), "--add-dir", str(path), "--add-dir", str(ROOT), "--json", prompt]
         try:
-            with JOBS_LOCK:
-                JOBS[job_id]["logs"].append("正在生成三套视觉方向和 review/01-directions.html…")
+            add_log("正在读取工作区资料…", "读取工作区资料")
+            workspace_files = sorted(item for item in path.rglob("*") if item.is_file() and ".git" not in item.parts)
+            for item in workspace_files:
+                add_log("已读取：" + str(item.relative_to(path)))
+            source_manifest = path / "project" / "source.json"
+            if source_manifest.is_file():
+                try:
+                    source_files = json.loads(source_manifest.read_text(encoding="utf-8")).get("files", [])
+                    for name in source_files:
+                        add_log("已读取参考资料：" + str(name))
+                except (OSError, json.JSONDecodeError):
+                    add_log("参考资料清单读取失败，继续使用工作区文件。")
+            add_log("正在生成三套视觉方向和 review/01-directions.html…", "生成方向页面")
             proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, cwd=str(path))
             for line in proc.stdout:
                 if not line.strip():
@@ -160,14 +178,23 @@ def start_generation(path):
                             if message not in JOBS[job_id]["logs"]:
                                 JOBS[job_id]["logs"].append(message)
             code = proc.wait()
-            with JOBS_LOCK:
-                if code == 0:
+            if code == 0:
+                generated = sorted(item for item in path.rglob("*") if item.is_file() and ".git" not in item.parts)
+                for item in generated:
+                    if item not in workspace_files:
+                        add_log("已生成：" + str(item.relative_to(path)))
+                add_log("正在运行检查和文件验证…", "运行 Phase 1 检查")
+                check = subprocess.run(["python3", str(ROOT / "scripts/check_workspace.py"), str(path), "--phase", "1"], capture_output=True, text=True)
+                result = (check.stdout + check.stderr).strip()
+                add_log("检查结果：" + (result or "无输出"))
+                with JOBS_LOCK:
                     JOBS[job_id]["status"] = "done"
-                    JOBS[job_id]["logs"].append("生成任务已完成，正在等待页面检查。")
-                else:
+                add_log("生成任务已完成，正在等待页面检查。", "等待页面检查")
+            else:
+                with JOBS_LOCK:
                     JOBS[job_id]["status"] = "error"
                     JOBS[job_id]["error"] = "生成进程退出码 %d" % code
-                    JOBS[job_id]["logs"].append("生成任务失败。")
+                add_log("生成任务失败。", "生成失败")
         except Exception as exc:
             with JOBS_LOCK:
                 JOBS[job_id]["status"] = "error"
