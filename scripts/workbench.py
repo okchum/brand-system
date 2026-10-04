@@ -23,7 +23,7 @@ HTML = r'''<!doctype html>
 <label>产品名称</label><input id="official" placeholder="例如 Tidewell"><label>产品功能和一句话描述</label><textarea id="oneLiner" rows="3" placeholder="例如：帮助独立团队管理客户反馈、路线图和发布计划"></textarea><label>主要功能（可选，用逗号分隔）</label><input id="capabilities" placeholder="例如：客户反馈、路线图、发布计划">
 <label>可选：AI 参考资料目录</label><p class="muted">可选择源码、产品文档或设计资料所在目录。它只读，不会成为生成目录，也不会被改写。</p><div class="row"><input id="sourcePath" aria-label="AI 参考资料目录" readonly placeholder="未选择，AI 只使用本次填写的信息"><button id="chooseSourceButton" class="secondary">浏览选择</button></div><p id="sourceHint" class="muted"></p>
 <button id="initButton">创建工作区并打开阶段 0</button><p id="result"></p></section>
-<section id="workspace"><h2>工作区状态</h2><div id="state"><p class="muted">创建或选择工作区后，当前阶段会显示在这里。</p></div><button id="checkButton" hidden>运行当前阶段检查</button><pre id="check"></pre></section><h3>活动日志</h3><div id="log" class="log" aria-live="polite"></div></main>
+<section id="workspace"><h2>工作区状态</h2><div id="state"><p class="muted">创建或选择工作区后，当前阶段会显示在这里。</p></div><button id="checkButton" hidden>运行当前阶段检查</button><button id="nextButton" class="secondary" hidden>下一阶段</button><pre id="check"></pre><div id="phases"></div></section><h3>活动日志</h3><div id="log" class="log" aria-live="polite"></div></main>
 <dialog id="chooser"><h3 id="chooserTitle">浏览选择目录</h3><p class="muted" id="chooserHelp"></p><select id="chooserList" size="8"></select><div class="dialog-actions"><button id="cancelChooser" class="secondary">取消</button><button id="confirmChooser">选择此目录</button></div></dialog>
 <script>
 let current='',recommended='',items=[],chooserMode='output'; const $=s=>document.querySelector(s); const dialog=$('#chooser');
@@ -34,12 +34,14 @@ function renderItems(){const list=$('#chooserList');list.replaceChildren();const
 function openChooser(mode){chooserMode=mode;$('#chooserTitle').textContent=mode==='output'?'选择生成目录':'选择 AI 参考资料目录';$('#chooserHelp').textContent=mode==='output'?'默认推荐新建 brand；已有工作区可以直接继续。':'选择启动目录读取源码和文档，或选择它下面的具体目录。';dialog.showModal()}
 function confirmChooser(){const o=$('#chooserList').selectedOptions[0];if(!o)return; if(chooserMode==='output'){$('#outputPath').value=o.value;$('#outputHint').textContent=o.dataset.workspace==='true'?'将继续此已有品牌工作区。':'品牌系统文件将在此目录创建。'}else{$('#sourcePath').value=o.value;checkSourcePath()}dialog.close()}
 async function checkSourcePath(){const value=$('#sourcePath').value.trim();if(!value){$('#sourceHint').textContent='未选择参考资料目录。';return}try{log('正在读取参考资料目录：'+value);const j=await get('/api/scan?path='+encodeURIComponent(value));$('#sourceHint').textContent='已找到 '+j.fileCount+' 个可读取文件，不会写入此目录。';log('参考资料读取准备完成，共 '+j.fileCount+' 个文件。')}catch(e){$('#sourceHint').className='error';$('#sourceHint').textContent=e.message;log('参考资料读取失败：'+e.message)}}
-function updateUrl(){const u=new URL(location.href);u.searchParams.set('workspace',current);u.searchParams.set('phase','0');history.pushState({},'',u)}
-async function initWorkspace(){const output=$('#outputPath').value,source=$('#sourcePath').value.trim();const capabilities=$('#capabilities').value.split(/[,，]/).map(x=>x.trim()).filter(Boolean);try{log('开始初始化，生成目录：'+output);if(source)log('将读取参考资料：'+source);const j=await get('/api/init',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({path:output,official:$('#official').value,oneLiner:$('#oneLiner').value,capabilities,sourcePath:source})});current=j.path;updateUrl();log('已写入阶段 0 文件。');await loadState()}catch(e){$('#result').className='error';$('#result').textContent=e.message;log('初始化失败：'+e.message)}}
-async function loadState(){if(!current)return;try{const j=await get('/api/state?path='+encodeURIComponent(current));$('#state').innerHTML='<div class="card"><b>'+esc(j.path)+'</b><br>阶段 '+j.phase+' · '+esc(j.state)+'<br>下一步：'+esc((j.next||[]).join('、')||'填写 brief 并生成方向审阅页')+'</div>';$('#checkButton').hidden=false;log('当前进度：阶段 '+j.phase+' · '+j.state)}catch(e){$('#state').textContent=e.message}}
+function updateUrl(phase,replace=false){const u=new URL(location.href);u.searchParams.set('workspace',current);u.searchParams.set('phase',String(phase));(replace?history.replaceState:history.pushState).call(history,{},'',u)}
+async function initWorkspace(){const output=$('#outputPath').value,source=$('#sourcePath').value.trim();const capabilities=$('#capabilities').value.split(/[,，]/).map(x=>x.trim()).filter(Boolean);try{log('开始初始化，生成目录：'+output);if(source)log('将读取参考资料：'+source);const j=await get('/api/init',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({path:output,official:$('#official').value,oneLiner:$('#oneLiner').value,capabilities,sourcePath:source})});current=j.path;updateUrl(0);log('已写入阶段 0 文件。');await loadState()}catch(e){$('#result').className='error';$('#result').textContent=e.message;log('初始化失败：'+e.message)}}
+function renderPhases(currentPhase){const names=['发现与计划','三套方向','品牌身份','设计系统','资产与平台','交付与发布'];const desc=['完善 brief、环境、策略和范围。','生成三套真正不同的方向并准备 G1。','完成 Logo、颜色、字体和身份规范。','完成 tokens、组件和无障碍规范。','生成平台资产、图标和导出清单。','完成 QA、交接和发布包。'];const box=$('#phases');box.replaceChildren();for(let i=0;i<6;i++){const panel=document.createElement('section');panel.className='phase '+(i===currentPhase?'current':'');const header=document.createElement('button');header.className='phase-header';header.textContent=(i<currentPhase?'✓ ':i===currentPhase?'● ':'🔒 ')+'Phase '+i+' · '+names[i];header.disabled=i>currentPhase;const body=document.createElement('div');body.className='phase-body';body.innerHTML='<p>'+desc[i]+'</p><p class="muted">'+(i<currentPhase?'已完成，可点击标题回看。':i===currentPhase?'当前阶段，完成检查后进入下一阶段。':'尚未到达，完成前置阶段后解锁。')+'</p>';if(i!==currentPhase)body.hidden=true;header.addEventListener('click',()=>{if(i<=currentPhase)body.hidden=!body.hidden});panel.append(header,body);box.appendChild(panel)}}
+async function loadState(){if(!current)return;try{const j=await get('/api/state?path='+encodeURIComponent(current));const phase=Number(j.phase);$('#state').innerHTML='<div class="card"><b>'+esc(j.path)+'</b><br>阶段 '+phase+' · '+esc(j.state)+'<br>下一步：'+esc((j.next||[]).join('、')||'填写 brief 并生成方向审阅页')+'</div>';$('#checkButton').hidden=false;$('#nextButton').hidden=phase>=5;$('#nextButton').textContent='完成检查并进入 Phase '+(phase+1);renderPhases(phase);updateUrl(phase,true);log('当前进度：阶段 '+phase+' · '+j.state)}catch(e){$('#state').textContent=e.message}}
 async function checkWorkspace(){if(!current){$('#check').textContent='请先创建或选择工作区。';return}try{log('正在运行当前阶段检查…');const j=await get('/api/check?path='+encodeURIComponent(current));$('#check').className=j.ok?'ok':'error';$('#check').textContent=j.output;log(j.ok?'阶段检查完成。':'阶段检查发现问题。')}catch(e){$('#check').textContent=e.message;log('检查失败：'+e.message)}}
+async function nextPhase(){if(!current)return;try{log('正在确认当前阶段可以推进…');const j=await get('/api/check?path='+encodeURIComponent(current));if(!j.ok){$('#check').className='error';$('#check').textContent=j.output;log('当前阶段仍有问题，暂不能进入下一阶段。');return}const s=await get('/api/state?path='+encodeURIComponent(current));await get('/api/advance',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({path:current,fromPhase:Number(s.phase)})});log('已进入 Phase '+(Number(s.phase)+1)+'。');await loadState()}catch(e){log('推进失败：'+e.message)}}
 function esc(s){return String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
-$('#chooseOutputButton').addEventListener('click',()=>openChooser('output'));$('#chooseSourceButton').addEventListener('click',()=>openChooser('source'));$('#cancelChooser').addEventListener('click',()=>dialog.close());$('#confirmChooser').addEventListener('click',confirmChooser);$('#initButton').addEventListener('click',initWorkspace);$('#checkButton').addEventListener('click',checkWorkspace);window.addEventListener('popstate',()=>{const p=new URL(location.href).searchParams.get('workspace');current=p||'';if(current)loadState()});scan();const initial=new URL(location.href).searchParams.get('workspace');if(initial){current=initial;loadState()}
+$('#chooseOutputButton').addEventListener('click',()=>openChooser('output'));$('#chooseSourceButton').addEventListener('click',()=>openChooser('source'));$('#cancelChooser').addEventListener('click',()=>dialog.close());$('#confirmChooser').addEventListener('click',confirmChooser);$('#initButton').addEventListener('click',initWorkspace);$('#checkButton').addEventListener('click',checkWorkspace);$('#nextButton').addEventListener('click',nextPhase);window.addEventListener('popstate',()=>{const p=new URL(location.href).searchParams.get('workspace');current=p||'';if(current)loadState()});scan();const initial=new URL(location.href).searchParams.get('workspace');if(initial){current=initial;loadState()}
 </script></body></html>'''
 
 
@@ -149,9 +151,28 @@ class Handler(BaseHTTPRequestHandler):
             self.send_json({"error": "not found"}, 404)
         except Exception as exc: self.send_json({"error": str(exc)}, 400)
     def do_POST(self):
-        if urlparse(self.path).path != "/api/init": return self.send_json({"error": "not found"}, 404)
+        endpoint = urlparse(self.path).path
+        if endpoint not in {"/api/init", "/api/advance"}: return self.send_json({"error": "not found"}, 404)
         try:
             body = json.loads(self.rfile.read(int(self.headers.get("Content-Length", "0"))))
+            if endpoint == "/api/advance":
+                path = Path(body.get("path", "")).expanduser().resolve()
+                status_path = path / "project/status.json"
+                status = json.loads(status_path.read_text(encoding="utf-8"))
+                phase = int(status["phase"])
+                if phase != int(body.get("fromPhase", -1)):
+                    raise ValueError("工作区阶段已经变化，请刷新后重试")
+                if phase >= 5:
+                    raise ValueError("已经是最后阶段")
+                import subprocess, sys
+                check = subprocess.run([sys.executable, str(ROOT / "scripts/check_workspace.py"), str(path), "--phase", str(phase)], capture_output=True, text=True)
+                if check.returncode != 0:
+                    raise ValueError("当前阶段检查未通过，不能推进：\n" + check.stdout + check.stderr)
+                status["phase"] = phase + 1
+                status["state"] = "draft"
+                status["next"] = ["complete current phase", "run phase check"]
+                status_path.write_text(json.dumps(status, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+                return self.send_json({"path": str(path), "phase": phase + 1})
             target = Path(body.get("path") or (self.root / "brand-workspace"))
             if not target.is_absolute(): target = self.root / target
             path = init_workspace(target, body.get("official", ""), body.get("oneLiner", ""), body.get("sourcePath") or None, body.get("capabilities") or []); self.send_json({"path": str(path)})
