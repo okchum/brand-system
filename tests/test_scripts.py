@@ -421,6 +421,7 @@ class CheckWorkspaceTest(Mentions, unittest.TestCase):
             self.assertTrue((target / "brand.brief.json").is_file())
             self.assertEqual(json.loads((target / "brand.brief.json").read_text())["product"]["capabilities"], ["feedback", "roadmap"])
             self.assertIn(str(source), (target / "docs/references.md").read_text())
+            self.assertEqual(json.loads((target / "project/source.json").read_text())["files"], ["README.md"])
             self.assertEqual(json.loads((target / "project/status.json").read_text())["phase"], 0)
             with self.assertRaises(ValueError):
                 workbench.init_workspace(Path(d), "Other", "Overwrite")

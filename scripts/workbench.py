@@ -114,6 +114,8 @@ def init_workspace(path, official, one_liner, source_path=None, capabilities=Non
             "AI reference source directory (read-only): `%s`\n\n"
             "Files available at initialization: %d\n" % (source, count), encoding="utf-8"
         )
+        files = [str(item.relative_to(source)) for item in sorted(source.rglob("*")) if item.is_file() and ".git" not in item.parts]
+        (path / "project/source.json").write_text(json.dumps({"root": str(source), "files": files}, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     (path / "project/status.json").write_text(json.dumps({"phase": 0, "state": "draft", "completed": [], "next": ["complete brief", "generate directions"], "blockers": []}, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     (path / "project/approvals.json").write_text("[]\n", encoding="utf-8")
     return path
