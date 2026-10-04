@@ -17,38 +17,32 @@ HTML = r'''<!doctype html>
 <html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Brand System Workbench</title>
 <style>
-:root{font:16px/1.5 system-ui,sans-serif;color:#17202a;background:#f5f7fb}body{max-width:980px;margin:0 auto;padding:32px}main{background:#fff;border:1px solid #dfe5ee;border-radius:16px;padding:28px;box-shadow:0 8px 30px #17202a12}h1{margin-top:0}label{display:block;margin:14px 0 6px;font-weight:650}input,textarea,select{width:100%;box-sizing:border-box;padding:10px;border:1px solid #c7d0dc;border-radius:8px;font:inherit}button{margin-top:18px;padding:11px 16px;border:0;border-radius:8px;background:#315efb;color:#fff;font-weight:700;cursor:pointer}button.secondary{background:#e8edf5;color:#17202a}.card{border:1px solid #dfe5ee;border-radius:10px;padding:16px;margin:12px 0}.muted{color:#687386}.error{color:#a32626}.ok{color:#166534;white-space:pre-wrap}.row{display:flex;gap:10px;align-items:center}.row>*{flex:1}.hidden{display:none}
-</style><body><main><h1>Brand System Workbench</h1><p class="muted">在网页中初始化和继续品牌工作区。不会自动覆盖已有文件。</p>
-<p id="notice" class="error"></p><section id="scan"><h2>选择 AI 可读取的文件夹</h2><p class="muted">先指定一个目录。工作台只扫描你指定目录中的文件夹和文件，并把它作为品牌工作区候选。</p><div class="row"><input id="scanPath" aria-label="指定扫描目录" placeholder="例如 /Users/you/Projects"><button id="scanPathButton" class="secondary">扫描此目录</button></div><select id="folder" aria-label="工作区文件夹"></select><p id="folderHint" class="muted"></p><div class="row"><button id="useSelectedButton">使用这个文件夹</button><button id="scanRootButton" class="secondary">扫描启动目录</button></div></section>
-<section id="form" class="hidden"><h2>初始化品牌工作区</h2><p id="target" class="muted"></p><label>品牌正式名称</label><input id="official" placeholder="例如 Tidewell"><label>一句话产品描述</label><textarea id="oneLiner" rows="2" placeholder="给谁解决什么问题"></textarea><label>工作区路径</label><input id="path"><button id="initButton">创建工作区并打开阶段 0</button><p id="result"></p></section>
-<section id="workspace" class="hidden"><h2>工作区状态</h2><div id="state"></div><button id="checkButton">运行当前阶段检查</button><button id="newWorkspaceButton" class="secondary">新建工作区</button><pre id="check"></pre></section></main>
+:root{font:16px/1.5 system-ui,sans-serif;color:#17202a;background:#f5f7fb}body{max-width:980px;margin:0 auto;padding:32px}main{background:#fff;border:1px solid #dfe5ee;border-radius:16px;padding:28px;box-shadow:0 8px 30px #17202a12}h1{margin-top:0}label{display:block;margin:14px 0 6px;font-weight:650}input,textarea,select{width:100%;box-sizing:border-box;padding:10px;border:1px solid #c7d0dc;border-radius:8px;font:inherit}button{margin-top:18px;padding:11px 16px;border:0;border-radius:8px;background:#315efb;color:#fff;font-weight:700;cursor:pointer}button.secondary{background:#e8edf5;color:#17202a}.card{border:1px solid #dfe5ee;border-radius:10px;padding:16px;margin:12px 0}.muted{color:#687386}.error{color:#a32626}.ok{color:#166534;white-space:pre-wrap}.row{display:flex;gap:10px;align-items:center}.row>*{flex:1}.hidden{display:none}.log{background:#111827;color:#d1fae5;border-radius:10px;padding:14px;min-height:90px;max-height:220px;overflow:auto;white-space:pre-wrap;font:13px/1.55 ui-monospace,monospace}
+</style><body><main><h1>Brand System Workbench</h1><p class="muted">在同一个页面决定生成位置、产品信息，以及 AI 是否读取已有源码或文档。</p>
+<p id="notice" class="error"></p><section id="setup"><h2>初始化品牌工作区</h2>
+<label>生成目录</label><p class="muted">品牌系统文件会写入这里。默认推荐新建一个空目录。</p><div class="row"><input id="scanPath" aria-label="扫描目录" placeholder="例如 /Users/you/Projects"><button id="scanPathButton" class="secondary">扫描目录</button></div><select id="folder" aria-label="生成目录"></select><p id="folderHint" class="muted"></p>
+<label>产品名称</label><input id="official" placeholder="例如 Tidewell"><label>产品功能和一句话描述</label><textarea id="oneLiner" rows="3" placeholder="例如：帮助独立团队管理客户反馈、路线图和发布计划"></textarea><label>主要功能（可选，用逗号分隔）</label><input id="capabilities" placeholder="例如：客户反馈、路线图、发布计划">
+<label>可选：AI 参考资料目录</label><p class="muted">如果已有源码、产品文档或设计资料，可输入目录让 AI 读取。它不会成为生成目录，也不会被改写。</p><div class="row"><input id="sourcePath" aria-label="AI 参考资料目录" placeholder="留空表示暂不读取已有资料"><button id="sourceScanButton" class="secondary">检查目录</button></div><p id="sourceHint" class="muted"></p>
+<button id="initButton">创建工作区并打开阶段 0</button><p id="result"></p><h3>活动日志</h3><div id="log" class="log" aria-live="polite"></div></section>
+<section id="workspace" class="hidden"><h2>工作区状态</h2><div id="state"></div><button id="checkButton">运行当前阶段检查</button><button id="newWorkspaceButton" class="secondary">新建工作区</button><pre id="check"></pre><h3>活动日志</h3><div id="workspaceLog" class="log" aria-live="polite"></div></section></main>
 <script>
-let current='';
+let current='',recommended='',items=[];
+const $=s=>document.querySelector(s); const logBox=()=>$('#workspace').classList.contains('hidden')?$('#log'):$('#workspaceLog');
+function log(message){const box=logBox();box.textContent+=(box.textContent?'\n':'')+'['+new Date().toLocaleTimeString()+'] '+message;box.scrollTop=box.scrollHeight}
 async function get(path,opts){let r=await fetch(path,opts);let j=await r.json();if(!r.ok)throw Error(j.error||'请求失败');return j}
-let recommended='';let items=[];let scanRoot='';
-async function scan(path=''){try{
- const j=await get('/api/scan'+(path?'?path='+encodeURIComponent(path):'')); recommended=j.recommended;items=j.items;scanRoot=j.root;document.querySelector('#scanPath').value=j.root;const el=document.querySelector('#folder');el.replaceChildren();document.querySelector('#notice').textContent='';
- const fresh=document.createElement('option');fresh.value=recommended;fresh.textContent='推荐：新建 '+recommended;fresh.dataset.workspace='false';el.appendChild(fresh);
- items.forEach(x=>{const option=document.createElement('option');option.value=x.path;option.textContent=(x.workspace?'已有工作区：':'已有文件夹：')+x.path;option.dataset.workspace=String(x.workspace);el.appendChild(option)});
- updateFolderHint();
-}catch(e){document.querySelector('#notice').textContent='工作台连接失败：'+e.message+'。请确认 workbench.py 仍在运行。'}}
-function scanSelectedPath(){const value=document.querySelector('#scanPath').value.trim();if(!value){document.querySelector('#notice').textContent='请先输入要扫描的文件夹路径。';return}scan(value)}
-document.querySelector('#scanPathButton').addEventListener('click',scanSelectedPath);
-document.querySelector('#useSelectedButton').addEventListener('click',useSelected);
-document.querySelector('#scanRootButton').addEventListener('click',()=>scan());
-document.querySelector('#initButton').addEventListener('click',initWorkspace);
-document.querySelector('#checkButton').addEventListener('click',checkWorkspace);
-document.querySelector('#newWorkspaceButton').addEventListener('click',()=>openForm());
-document.addEventListener('change',e=>{if(e.target.id==='folder')updateFolderHint()});
-function updateFolderHint(){const el=document.querySelector('#folder');const option=el.options[el.selectedIndex];document.querySelector('#folderHint').textContent=option&&option.dataset.workspace==='true'?'这是已有品牌工作区，可以继续。':'将在选定目录中创建品牌工作区；如果目录已有其他文件，建议保留推荐的新文件夹。'}
-function useSelected(){const el=document.querySelector('#folder');const option=el.options[el.selectedIndex];if(option.dataset.workspace==='true')selectPath(option.value,true);else openForm(option.value)}
-function selectPath(p,existing){if(existing){current=p;document.querySelector('#scan').classList.add('hidden');document.querySelector('#workspace').classList.remove('hidden');loadState()}else{openForm(p)}}
-function openForm(p){document.querySelector('#scan').classList.add('hidden');document.querySelector('#workspace').classList.add('hidden');document.querySelector('#form').classList.remove('hidden');document.querySelector('#path').value=p||recommended;document.querySelector('#target').textContent=p?'将在此目录创建品牌工作区。':'请选择一个目录或输入新子目录路径。'}
-async function initWorkspace(){let body={path:document.querySelector('#path').value,official:document.querySelector('#official').value,oneLiner:document.querySelector('#oneLiner').value};try{let j=await get('/api/init',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});current=j.path;document.querySelector('#form').classList.add('hidden');document.querySelector('#workspace').classList.remove('hidden');await loadState();document.querySelector('#result').textContent='已创建';}catch(e){document.querySelector('#result').className='error';document.querySelector('#result').textContent=e.message}}
-async function loadState(){let j=await get('/api/state?path='+encodeURIComponent(current));document.querySelector('#state').innerHTML='<div class="card"><b>'+esc(j.path)+'</b><br>阶段 '+j.phase+' · '+esc(j.state)+'<br>下一步：'+esc((j.next||[]).join('、')||'填写 brief 并生成方向审阅页')+'</div>'}
-async function checkWorkspace(){try{let j=await get('/api/check?path='+encodeURIComponent(current));document.querySelector('#check').className=j.ok?'ok':'error';document.querySelector('#check').textContent=j.output}catch(e){document.querySelector('#check').textContent=e.message}}
-function esc(s){return String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}scan();
+async function scan(path=''){try{log('正在扫描生成目录候选…');const j=await get('/api/scan'+(path?'?path='+encodeURIComponent(path):''));recommended=j.recommended;items=j.items;$('#scanPath').value=j.root;const el=$('#folder');el.replaceChildren();$('#notice').textContent='';const fresh=document.createElement('option');fresh.value=recommended;fresh.textContent='推荐新建：'+recommended;fresh.dataset.workspace='false';el.appendChild(fresh);items.forEach(x=>{const option=document.createElement('option');option.value=x.path;option.textContent=(x.workspace?'继续已有工作区：':'已有目录：')+x.path;option.dataset.workspace=String(x.workspace);el.appendChild(option)});updateFolderHint();log('已找到 '+items.length+' 个目录候选。')}catch(e){$('#notice').textContent='工作台连接失败：'+e.message+'。请确认 workbench.py 仍在运行。';log('扫描失败：'+e.message)}}
+function scanSelectedPath(){const value=$('#scanPath').value.trim();if(!value){$('#notice').textContent='请先输入要扫描的文件夹路径。';return}scan(value)}
+function updateFolderHint(){const option=$('#folder').options[$('#folder').selectedIndex];$('#folderHint').textContent=option&&option.dataset.workspace==='true'?'这是已有品牌工作区，创建按钮会直接打开它。':'品牌系统文件将在此目录创建；已有普通文件夹不会被自动占用。'}
+async function checkSourcePath(){const value=$('#sourcePath').value.trim();if(!value){$('#sourceHint').textContent='未指定参考资料目录，AI 只使用本次填写的产品信息。';log('未指定参考资料目录。');return}try{log('正在检查参考资料目录：'+value);const j=await get('/api/scan?path='+encodeURIComponent(value));$('#sourceHint').textContent='已找到 '+j.fileCount+' 个可读取文件。不会写入此目录。';log('参考资料目录可读取，共 '+j.fileCount+' 个文件。')}catch(e){$('#sourceHint').className='error';$('#sourceHint').textContent=e.message;log('参考资料目录检查失败：'+e.message)}}
+function selectedOutputPath(){return $('#folder').value||recommended}
+function showSetup(){$('#workspace').classList.add('hidden');$('#setup').classList.remove('hidden');log('准备创建新的品牌工作区。')}
+async function initWorkspace(){const output=selectedOutputPath(),source=$('#sourcePath').value.trim();const capabilities=$('#capabilities').value.split(/[,，]/).map(x=>x.trim()).filter(Boolean);const body={path:output,official:$('#official').value,oneLiner:$('#oneLiner').value,capabilities,sourcePath:source};try{log('开始初始化，生成目录：'+output);if(source)log('将读取参考资料：'+source);let j=await get('/api/init',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});current=j.path;log('已写入阶段 0 文件。');if(source)log('已记录参考资料目录，不会修改源目录。');$('#setup').classList.add('hidden');$('#workspace').classList.remove('hidden');await loadState();}catch(e){$('#result').className='error';$('#result').textContent=e.message;log('初始化失败：'+e.message)}}
+async function loadState(){let j=await get('/api/state?path='+encodeURIComponent(current));$('#state').innerHTML='<div class="card"><b>'+esc(j.path)+'</b><br>阶段 '+j.phase+' · '+esc(j.state)+'<br>下一步：'+esc((j.next||[]).join('、')||'填写 brief 并生成方向审阅页')+'</div>'}
+async function checkWorkspace(){try{log('正在运行当前阶段检查…');let j=await get('/api/check?path='+encodeURIComponent(current));$('#check').className=j.ok?'ok':'error';$('#check').textContent=j.output;log(j.ok?'阶段检查完成。':'阶段检查发现问题。')}catch(e){$('#check').textContent=e.message;log('检查失败：'+e.message)}}
+function esc(s){return String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
+$('#scanPathButton').addEventListener('click',scanSelectedPath);$('#sourceScanButton').addEventListener('click',checkSourcePath);$('#initButton').addEventListener('click',initWorkspace);$('#checkButton').addEventListener('click',checkWorkspace);$('#newWorkspaceButton').addEventListener('click',showSetup);$('#folder').addEventListener('change',updateFolderHint);scan();
 </script></body></html>'''
+
 
 
 def is_workspace(path):
@@ -80,8 +74,13 @@ def candidates(root):
     return items
 
 
-def init_workspace(path, official, one_liner):
+def init_workspace(path, official, one_liner, source_path=None, capabilities=None):
     path = Path(path).expanduser().resolve()
+    source = None
+    if source_path:
+        source = Path(source_path).expanduser().resolve()
+        if not source.is_dir() or not source.is_relative_to(path.parent.parent):
+            raise ValueError("参考资料目录必须是启动目录父目录下的可读取文件夹")
     path.mkdir(parents=True, exist_ok=True)
     if any(path.iterdir()) and not is_workspace(path):
         # Existing files are safe to retain, but avoid silently claiming them as a workspace.
@@ -92,6 +91,7 @@ def init_workspace(path, official, one_liner):
     brief = json.loads(TEMPLATE.read_text(encoding="utf-8"))
     brief["name"]["official"] = official or None
     brief["product"]["oneLiner"] = one_liner or None
+    brief["product"]["capabilities"] = capabilities or []
     brief["name"]["final"] = bool(official)
     (path / "brand.brief.json").write_text(json.dumps(brief, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     files = {
@@ -107,6 +107,13 @@ def init_workspace(path, official, one_liner):
     }
     for rel, content in files.items():
         target = path / rel; target.parent.mkdir(parents=True, exist_ok=True); target.write_text(content, encoding="utf-8")
+    if source_path:
+        count = sum(1 for item in source.rglob("*") if item.is_file() and ".git" not in item.parts)
+        (path / "docs/references.md").write_text(
+            "# References\n\n"
+            "AI reference source directory (read-only): `%s`\n\n"
+            "Files available at initialization: %d\n" % (source, count), encoding="utf-8"
+        )
     (path / "project/status.json").write_text(json.dumps({"phase": 0, "state": "draft", "completed": [], "next": ["complete brief", "generate directions"], "blockers": []}, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     (path / "project/approvals.json").write_text("[]\n", encoding="utf-8")
     return path
@@ -129,7 +136,8 @@ class Handler(BaseHTTPRequestHandler):
                 target = path if q.get("path") else self.root
                 if not target.is_dir(): raise ValueError("指定路径不是可读取的文件夹")
                 if not target.is_relative_to(self.root.parent): raise ValueError("为安全起见，请指定启动目录或其父目录下的文件夹")
-                return self.send_json({"root": str(target), "items": candidates(target), "recommended": str(recommended_folder(target))})
+                file_count = sum(1 for item in target.rglob("*") if item.is_file() and ".git" not in item.parts)
+                return self.send_json({"root": str(target), "items": candidates(target), "fileCount": file_count, "recommended": str(recommended_folder(target))})
             if parsed.path == "/api/state":
                 status = json.loads((path / "project/status.json").read_text()); return self.send_json({"path": str(path), **status})
             if parsed.path == "/api/check":
@@ -144,7 +152,7 @@ class Handler(BaseHTTPRequestHandler):
             body = json.loads(self.rfile.read(int(self.headers.get("Content-Length", "0"))))
             target = Path(body.get("path") or (self.root / "brand-workspace"))
             if not target.is_absolute(): target = self.root / target
-            path = init_workspace(target, body.get("official", ""), body.get("oneLiner", "")); self.send_json({"path": str(path)})
+            path = init_workspace(target, body.get("official", ""), body.get("oneLiner", ""), body.get("sourcePath") or None, body.get("capabilities") or []); self.send_json({"path": str(path)})
         except Exception as exc: self.send_json({"error": str(exc)}, 400)
     def log_message(self, *_): pass
 

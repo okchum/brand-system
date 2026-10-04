@@ -414,8 +414,13 @@ class CheckWorkspaceTest(Mentions, unittest.TestCase):
     def test_workbench_initializes_and_refuses_nonempty_directory(self):
         with tempfile.TemporaryDirectory() as d:
             target = Path(d) / "brand-workspace"
-            workbench.init_workspace(target, "Acme", "A product")
+            source = Path(d) / "source"
+            source.mkdir()
+            (source / "README.md").write_text("source")
+            workbench.init_workspace(target, "Acme", "A product", str(source), ["feedback", "roadmap"])
             self.assertTrue((target / "brand.brief.json").is_file())
+            self.assertEqual(json.loads((target / "brand.brief.json").read_text())["product"]["capabilities"], ["feedback", "roadmap"])
+            self.assertIn(str(source), (target / "docs/references.md").read_text())
             self.assertEqual(json.loads((target / "project/status.json").read_text())["phase"], 0)
             with self.assertRaises(ValueError):
                 workbench.init_workspace(Path(d), "Other", "Overwrite")
