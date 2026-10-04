@@ -34,11 +34,12 @@ function renderItems(){const list=$('#chooserList');list.replaceChildren();const
 function openChooser(mode){chooserMode=mode;$('#chooserTitle').textContent=mode==='output'?'选择生成目录':'选择 AI 参考资料目录';$('#chooserHelp').textContent=mode==='output'?'默认推荐新建 brand；已有工作区可以直接继续。':'选择启动目录读取源码和文档，或选择它下面的具体目录。';dialog.showModal()}
 function confirmChooser(){const o=$('#chooserList').selectedOptions[0];if(!o)return; if(chooserMode==='output'){const existing=o.dataset.workspace==='true';$('#outputPath').value=o.value;$('#outputPath').dataset.workspace=String(existing);$('#initButton').textContent=existing?'打开已有工作区':'创建工作区并打开阶段 0';$('#outputHint').textContent=existing?'将打开此已有品牌工作区，保留当前阶段和文件。':'品牌系统文件将在此目录创建。'}else{$('#sourcePath').value=o.value;checkSourcePath()}dialog.close()}
 async function checkSourcePath(){const value=$('#sourcePath').value.trim();if(!value){$('#sourceHint').textContent='未选择参考资料目录。';return}try{log('正在读取参考资料目录：'+value,0);const j=await get('/api/scan?path='+encodeURIComponent(value));$('#sourceHint').textContent='已找到 '+j.fileCount+' 个可读取文件，不会写入此目录。';log('参考资料读取准备完成，共 '+j.fileCount+' 个文件。',0)}catch(e){$('#sourceHint').className='error';$('#sourceHint').textContent=e.message;log('参考资料读取失败：'+e.message,0)}}
+function phaseInstruction(phase){return ['先补全 brief、环境、策略和范围文件，再检查进入 Phase 1。','当前网页负责初始化、读取和检查，尚未接入方向生成器。请先在 Codex/Claude 中运行 brand-system skill，生成三套真正不同的视觉方向和 review/01-directions.html；完成后回到这里重新检查。','先完成 Logo、颜色、字体和身份规范，再检查进入下一阶段。','先完成 tokens、组件和无障碍规范，再检查进入下一阶段。','先完成平台资产、图标和导出清单，再检查进入下一阶段。','先完成 QA、交接和发布包，再检查发布候选。'][phase]||'先完成当前阶段标注的交付物，再重新检查。'}
 function updateUrl(phase,replace=false){const u=new URL(location.href);u.searchParams.set('workspace',current);u.searchParams.set('phase',String(phase));(replace?history.replaceState:history.pushState).call(history,{},'',u)}
 async function initWorkspace(){const output=$('#outputPath').value,source=$('#sourcePath').value.trim(),existing=$('#outputPath').dataset.workspace==='true';const capabilities=$('#capabilities').value.split(/[,，]/).map(x=>x.trim()).filter(Boolean);try{if(existing){current=output;await loadState();log('已打开已有品牌工作区。',activePhase);return}log('开始初始化，生成目录：'+output,0);if(source)log('将读取参考资料：'+source,0);const j=await get('/api/init',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({path:output,official:$('#official').value,oneLiner:$('#oneLiner').value,capabilities,sourcePath:source})});current=j.path;updateUrl(0);log('已写入阶段 0 文件。',0);await loadState()}catch(e){$('#result').className='error';$('#result').textContent=e.message;log('初始化失败：'+e.message,0)}}
 function renderPhases(currentPhase){activePhase=currentPhase;const names=['发现与计划','三套方向','品牌身份','设计系统','资产与平台','交付与发布'];const desc=['完善 brief、环境、策略和范围。','生成三套真正不同的方向并准备 G1。','完成 Logo、颜色、字体和身份规范。','完成 tokens、组件和无障碍规范。','生成平台资产、图标和导出清单。','完成 QA、交接和发布包。'];const box=$('#phases');box.replaceChildren();for(let i=0;i<6;i++){const panel=document.createElement('section');panel.className='phase '+(i===currentPhase?'current':'');const header=document.createElement('button');header.className='phase-header';header.textContent=(i<currentPhase?'✓ ':i===currentPhase?'● ':'🔒 ')+'Phase '+i+' · '+names[i]+' · '+desc[i];header.disabled=i>currentPhase;const body=document.createElement('div');body.className='phase-body';const actions=i===currentPhase&&i<5?'<div class="phase-actions"><button id="checkButton">检查并进入 Phase '+(i+1)+'</button><pre id="phaseCheck-'+i+'" class="phase-check"></pre></div>':'';body.innerHTML='<p class="muted">'+(i<currentPhase?'已完成，可点击标题回看。':i===currentPhase?'当前阶段，完成检查后进入下一阶段。':'尚未到达，完成前置阶段后解锁。')+'</p>'+actions+'<h4>Phase '+i+' 活动日志</h4><div id="phaseLog-'+i+'" class="phase-log" aria-live="polite">'+phaseLogs[i].join('\n')+'</div>';if(i!==currentPhase)body.hidden=true;header.addEventListener('click',()=>{if(i<=currentPhase)body.hidden=!body.hidden});panel.append(header,body);box.appendChild(panel)}}
-async function loadState(){if(!current)return;try{const j=await get('/api/state?path='+encodeURIComponent(current));const phase=Number(j.phase);$('#state').innerHTML='<div class="card"><b>'+esc(j.path)+'</b><br>阶段 '+phase+' · '+esc(j.state)+'<br>下一步：'+esc((j.next||[]).join('、')||'填写 brief 并生成方向审阅页')+'</div>';renderPhases(phase);updateUrl(phase,true);log('当前进度：阶段 '+phase+' · '+j.state,phase)}catch(e){$('#state').textContent=e.message}}
-async function checkWorkspace(){if(!current)return;const output=$('#phaseCheck-'+activePhase);try{log('正在检查当前 Phase 并准备推进…',activePhase);const j=await get('/api/check?path='+encodeURIComponent(current));if(!j.ok){output.className='error';output.textContent=j.output;log('当前 Phase 未通过，暂不推进。',activePhase);return}await advancePhase()}catch(e){output.className='error';output.textContent=e.message;log('检查失败：'+e.message,activePhase)}}
+async function loadState(){if(!current)return;try{const j=await get('/api/state?path='+encodeURIComponent(current));const phase=Number(j.phase);$('#state').innerHTML='<div class="card"><b>'+esc(j.path)+'</b><br>阶段 '+phase+' · '+esc(j.state)+'<br>下一步：'+esc(phaseInstruction(phase))+'</div>';renderPhases(phase);updateUrl(phase,true);log('当前进度：阶段 '+phase+' · '+j.state,phase)}catch(e){$('#state').textContent=e.message}}
+async function checkWorkspace(){if(!current)return;const output=$('#phaseCheck-'+activePhase);try{log('正在检查当前 Phase 并准备推进…',activePhase);const j=await get('/api/check?path='+encodeURIComponent(current));if(!j.ok){output.className='error';output.textContent=j.output.trim()+'\n\n下一步：'+phaseInstruction(activePhase);log('当前 Phase 未通过：'+phaseInstruction(activePhase),activePhase);return}await advancePhase()}catch(e){output.className='error';output.textContent=e.message;log('检查失败：'+e.message,activePhase)}}
 async function advancePhase(){const s=await get('/api/state?path='+encodeURIComponent(current));await get('/api/advance',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({path:current,fromPhase:Number(s.phase)})});log('已进入 Phase '+(Number(s.phase)+1)+'。',activePhase);await loadState()}
 function esc(s){return String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
 $('#chooseOutputButton').addEventListener('click',()=>openChooser('output'));$('#chooseSourceButton').addEventListener('click',()=>openChooser('source'));$('#cancelChooser').addEventListener('click',()=>dialog.close());$('#confirmChooser').addEventListener('click',confirmChooser);$('#initButton').addEventListener('click',initWorkspace);$('#phases').addEventListener('click',event=>{if(event.target.id==='checkButton')checkWorkspace()});window.addEventListener('popstate',()=>{const p=new URL(location.href).searchParams.get('workspace');current=p||'';if(current)loadState()});scan();const initial=new URL(location.href).searchParams.get('workspace');if(initial){current=initial;loadState()}
@@ -125,6 +126,12 @@ def init_workspace(path, official, one_liner, source_path=None, capabilities=Non
 
 class Handler(BaseHTTPRequestHandler):
     root = Path.cwd().resolve()
+    @classmethod
+    def workspace_path(cls, raw):
+        path = Path(raw).expanduser().resolve()
+        if not path.is_relative_to(cls.root):
+            raise ValueError("工作区必须位于启动目录内")
+        return path
     def send_json(self, payload, status=200):
         data = json.dumps(payload, ensure_ascii=False).encode()
         self.send_response(status); self.send_header("Content-Type", "application/json; charset=utf-8"); self.send_header("Content-Length", str(len(data))); self.end_headers(); self.wfile.write(data)
@@ -143,8 +150,10 @@ class Handler(BaseHTTPRequestHandler):
                 file_count = sum(1 for item in target.rglob("*") if item.is_file() and ".git" not in item.parts)
                 return self.send_json({"root": str(target), "items": candidates(target), "fileCount": file_count, "recommended": str(recommended_folder(target))})
             if parsed.path == "/api/state":
+                path = self.workspace_path(q.get("path", [""])[0])
                 status = json.loads((path / "project/status.json").read_text()); return self.send_json({"path": str(path), **status})
             if parsed.path == "/api/check":
+                path = self.workspace_path(q.get("path", [""])[0])
                 import subprocess, sys
                 p = subprocess.run([sys.executable, str(ROOT / "scripts/check_workspace.py"), str(path), "--phase", str(json.loads((path / "project/status.json").read_text())["phase"])], capture_output=True, text=True)
                 return self.send_json({"ok": p.returncode == 0, "output": p.stdout + p.stderr})
@@ -156,7 +165,7 @@ class Handler(BaseHTTPRequestHandler):
         try:
             body = json.loads(self.rfile.read(int(self.headers.get("Content-Length", "0"))))
             if endpoint == "/api/advance":
-                path = Path(body.get("path", "")).expanduser().resolve()
+                path = self.workspace_path(body.get("path", ""))
                 status_path = path / "project/status.json"
                 status = json.loads(status_path.read_text(encoding="utf-8"))
                 phase = int(status["phase"])
