@@ -55,6 +55,9 @@ def build():
     blocks = sections(skill)
     for ref in sorted((ROOT / "references").glob("*.md")):
         blocks += sections(ref.read_text(encoding="utf-8"))
+    keys = [section_key(block) for block in blocks]
+    if len(set(keys)) != len(keys):
+        raise ValueError("duplicate section number or appendix")
     head = title + "\n\n" + NOTE + "\n" + rest.rstrip()
     return "\n\n---\n\n".join([head] + sorted(blocks, key=section_key)) + "\n"
 

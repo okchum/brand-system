@@ -168,7 +168,7 @@ description: 为一个软件产品建立生产导向的完整品牌系统仓库�
 
 不要依赖聊天记忆作为唯一进度存储。每完成一个可验证工作单元，更新：
 
-- `project/status.json`：`{phase, state, completed, next, blockers}`；`phase` 为整数，`blockers` 为数组，每条是需外部工具/用户/供应商解决的问题，写成 `{reason, impact, owner, workaround}`。
+- `project/status.json`：`{phase, state, completed, next, blockers}`；`phase` 为整数；`state` 取 `draft / in-progress / in-review / approved / blocked / complete`；`completed` 与 `next` 为非空白字符串数组（允许空数组）；`blockers` 为数组，每条是需外部工具/用户/供应商解决的问题，写成 `{reason, impact, owner, workaround}`。
 - `project/plan.md`：剩余里程碑和验收条件。
 - `project/approvals.json`：只追加真实的审批、撤回或修改要求记录（格式见第 04 节），不改写旧记录。
 - `project/decisions.md`：简要结论、理由、取舍和影响。
