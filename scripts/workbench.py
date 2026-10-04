@@ -19,27 +19,22 @@ HTML = r'''<!doctype html>
 <style>
 :root{font:16px/1.5 system-ui,sans-serif;color:#17202a;background:#f5f7fb}body{max-width:980px;margin:0 auto;padding:32px}main{background:#fff;border:1px solid #dfe5ee;border-radius:16px;padding:28px;box-shadow:0 8px 30px #17202a12}h1{margin-top:0}label{display:block;margin:14px 0 6px;font-weight:650}input,textarea,select{width:100%;box-sizing:border-box;padding:10px;border:1px solid #c7d0dc;border-radius:8px;font:inherit}button{margin-top:18px;padding:11px 16px;border:0;border-radius:8px;background:#315efb;color:#fff;font-weight:700;cursor:pointer}button.secondary{background:#e8edf5;color:#17202a}.card{border:1px solid #dfe5ee;border-radius:10px;padding:16px;margin:12px 0}.muted{color:#687386}.error{color:#a32626}.ok{color:#166534;white-space:pre-wrap}.row{display:flex;gap:10px;align-items:center}.row>*{flex:1}.hidden{display:none}
 </style><body><main><h1>Brand System Workbench</h1><p class="muted">在网页中初始化和继续品牌工作区。不会自动覆盖已有文件。</p>
-<p id="notice" class="error"></p><section id="scan"><h2>选择工作区</h2><div id="candidates"></div><button onclick="scan()" class="secondary">重新扫描</button></section>
+<p id="notice" class="error"></p><section id="scan"><h2>选择工作区文件夹</h2><p class="muted">已扫描当前目录和一级子目录。推荐项会明确标注，你可以先选择文件夹，再决定继续或创建。</p><select id="folder" aria-label="工作区文件夹"></select><p id="folderHint" class="muted"></p><div class="row"><button onclick="useSelected()">使用这个文件夹</button><button onclick="scan()" class="secondary">重新扫描</button></div></section>
 <section id="form" class="hidden"><h2>初始化品牌工作区</h2><p id="target" class="muted"></p><label>品牌正式名称</label><input id="official" placeholder="例如 Tidewell"><label>一句话产品描述</label><textarea id="oneLiner" rows="2" placeholder="给谁解决什么问题"></textarea><label>工作区路径</label><input id="path"><button onclick="initWorkspace()">创建工作区并打开阶段 0</button><p id="result"></p></section>
 <section id="workspace" class="hidden"><h2>工作区状态</h2><div id="state"></div><button onclick="checkWorkspace()">运行当前阶段检查</button><button onclick="openForm()" class="secondary">新建工作区</button><pre id="check"></pre></section></main>
 <script>
 let current='';
 async function get(path,opts){let r=await fetch(path,opts);let j=await r.json();if(!r.ok)throw Error(j.error||'请求失败');return j}
-let recommended='';
+let recommended='';let items=[];
 async function scan(){try{
- const j=await get('/api/scan'); recommended=j.recommended;
- const el=document.querySelector('#candidates');el.replaceChildren();document.querySelector('#notice').textContent='';
- const add=(path,title,description,label,action)=>{
-  const card=document.createElement('div');card.className='card';
-  const heading=document.createElement('b');heading.textContent=title;
-  const details=document.createElement('p');details.textContent=description;
-  const location=document.createElement('p');location.className='muted';location.textContent=path;
-  const button=document.createElement('button');button.textContent=label;button.addEventListener('click',action);
-  card.append(heading,details,location,button);el.appendChild(card);
- };
- add(recommended,'创建新文件夹（推荐）','将品牌文件集中保存在独立文件夹中，名称和路径可以修改。','创建新文件夹',()=>openForm(recommended));
- j.items.forEach(x=>add(x.path,x.kind,'',x.workspace?'继续此工作区':'选择此目录',()=>selectPath(x.path,x.workspace)));
+ const j=await get('/api/scan'); recommended=j.recommended;items=j.items;const el=document.querySelector('#folder');el.replaceChildren();document.querySelector('#notice').textContent='';
+ const fresh=document.createElement('option');fresh.value=recommended;fresh.textContent='推荐：新建 '+recommended;fresh.dataset.workspace='false';el.appendChild(fresh);
+ items.forEach(x=>{const option=document.createElement('option');option.value=x.path;option.textContent=(x.workspace?'已有工作区：':'已有文件夹：')+x.path;option.dataset.workspace=String(x.workspace);el.appendChild(option)});
+ updateFolderHint();
 }catch(e){document.querySelector('#notice').textContent='工作台连接失败：'+e.message+'。请确认 workbench.py 仍在运行。'}}
+document.addEventListener('change',e=>{if(e.target.id==='folder')updateFolderHint()});
+function updateFolderHint(){const el=document.querySelector('#folder');const option=el.options[el.selectedIndex];document.querySelector('#folderHint').textContent=option&&option.dataset.workspace==='true'?'这是已有品牌工作区，可以继续。':'将在选定目录中创建品牌工作区；如果目录已有其他文件，建议保留推荐的新文件夹。'}
+function useSelected(){const el=document.querySelector('#folder');const option=el.options[el.selectedIndex];if(option.dataset.workspace==='true')selectPath(option.value,true);else openForm(option.value)}
 function selectPath(p,existing){if(existing){current=p;document.querySelector('#scan').classList.add('hidden');document.querySelector('#workspace').classList.remove('hidden');loadState()}else{openForm(p)}}
 function openForm(p){document.querySelector('#scan').classList.add('hidden');document.querySelector('#workspace').classList.add('hidden');document.querySelector('#form').classList.remove('hidden');document.querySelector('#path').value=p||recommended;document.querySelector('#target').textContent=p?'将在此目录创建品牌工作区。':'请选择一个目录或输入新子目录路径。'}
 async function initWorkspace(){let body={path:document.querySelector('#path').value,official:document.querySelector('#official').value,oneLiner:document.querySelector('#oneLiner').value};try{let j=await get('/api/init',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});current=j.path;document.querySelector('#form').classList.add('hidden');document.querySelector('#workspace').classList.remove('hidden');await loadState();document.querySelector('#result').textContent='已创建';}catch(e){document.querySelector('#result').className='error';document.querySelector('#result').textContent=e.message}}
