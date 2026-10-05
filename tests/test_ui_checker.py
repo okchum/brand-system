@@ -166,6 +166,14 @@ class UiCheckerTest(unittest.TestCase):
         findings = self.findings(status={"phase": 4, "blockers": [], "units": [{"unitId": "map", "status": "approved"}]}, approvals=[mixed])
         self.assert_finding(findings, "unit-review cannot be a gate")
 
+    def test_unit_review_file_scope_must_name_the_unit_outputs(self):
+        status = {"phase": 4, "blockers": [], "units": [{"unitId": "map", "status": "approved"}]}
+        review = self.approved_review("map")
+        self.assertNotIn("fileScope", " ".join(self.findings(status=status, approvals=[review])))
+        review["fileScope"] = [{"path": "src/ui/layout.html", "startLine": 1, "endLine": 1}]
+        findings = self.findings(status=status, approvals=[review])
+        self.assert_finding(findings, "unit-review map fileScope must name its unit files")
+
     def test_each_manifest_unit_requires_its_own_review(self):
         status = {"phase": 4, "blockers": [], "units": [
             {"unitId": "map", "status": "approved"},

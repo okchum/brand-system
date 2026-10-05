@@ -312,6 +312,8 @@ def append_unit_review(workspace, unit_id, conclusion, reviewer, evidence, file_
     for scope in file_scope:
         if not isinstance(scope, dict) or not isinstance(scope.get("path"), str) or not isinstance(scope.get("startLine"), int) or not isinstance(scope.get("endLine"), int) or scope["startLine"] < 1 or scope["endLine"] < scope["startLine"]:
             raise ValueError("fileScope 必须包含有效的 path 和行号")
+        if scope["path"] not in unit["files"]:
+            raise ValueError("fileScope 只能引用该 unit 的输出文件")
     record = {
         "kind": "unit-review",
         "unitId": unit_id,

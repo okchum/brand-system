@@ -405,9 +405,14 @@ def check_units(ws, phase, status, manifest, latest_reviews, problems):
         for unit in manifest.get("units", [])
         if isinstance(unit, dict) and present(unit, "id")
     }
-    for review_id in latest_reviews:
+    for review_id, review in latest_reviews.items():
         if review_id not in manifest_units:
             problems.append("unit-review %s does not name a manifest unit" % review_id)
+            continue
+        unit_files = manifest_units[review_id].get("files") or []
+        scopes = review.get("fileScope") if isinstance(review.get("fileScope"), list) else []
+        if any(not isinstance(scope, dict) or scope.get("path") not in unit_files for scope in scopes):
+            problems.append("unit-review %s fileScope must name its unit files" % review_id)
     status_by_id = {}
     for index, item in enumerate(units):
         label = "project/status.json unit #%d" % index

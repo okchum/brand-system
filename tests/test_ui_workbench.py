@@ -237,6 +237,19 @@ class UiWorkbenchTest(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "page-map"):
                 workbench.prepare_unit_generation(workspace, "layout")
 
+    def test_unit_review_file_scope_must_name_the_unit_outputs(self):
+        with tempfile.TemporaryDirectory() as root:
+            workspace = self.init(root)
+            workbench.mark_unit_in_review(workspace, "page-map", ["src/ui/units/page-map/output.html"])
+            for path in ("../../etc/passwd", "src/ui/units/layout/output.html"):
+                with self.subTest(path=path), self.assertRaisesRegex(ValueError, "fileScope"):
+                    workbench.append_unit_review(
+                        workspace, "page-map", "approved",
+                        reviewer={"type": "subagent", "name": "ui-reviewer"},
+                        evidence=["review-evidence.json"],
+                        file_scope=[{"path": path, "startLine": 1, "endLine": 1}],
+                    )
+
 
 if __name__ == "__main__":
     unittest.main()
