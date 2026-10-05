@@ -1,8 +1,10 @@
 """Exercise workspace initialization, UI unit records, phase gates, and release checks."""
 import json
+import re
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 import check_workspace
@@ -29,27 +31,34 @@ def approval(gate, status="approved"):
         "scope": "smoke fixture",
         "snapshot": "direction-A" if gate == "G1" else "smoke fixture",
         "version": "smoke-%s" % gate.lower(),
-        "confirmation": "synthetic smoke assertion",
+        "confirmation": "smoke: user chose direction A" if gate == "G1" else "synthetic smoke assertion",
         "approvedAt": "2026-10-05T00:00:00Z",
     }
 
 
+def stand_in_codex(cmd, cwd, timeout):
+    """Replaces only the codex process: generation writes the unit output, review returns a verdict."""
+    if "read-only" in cmd:
+        verdict = {"conclusion": "approved", "summary": "smoke review", "findings": []}
+        Path(cmd[cmd.index("-o") + 1]).write_text(json.dumps(verdict), encoding="utf-8")
+        return 0
+    relative = re.search(r"src/ui/units/[a-z-]+/output\.html", cmd[-1]).group(0)
+    write_file(Path(cwd), relative, "<main>%s</main>\n" % relative)
+    return 0
+
+
 def review_units_in_order(workspace):
+    """Drive every unit through the workbench's real job path (claim, snapshot, generate, review, record)."""
+    workbench._run_codex = stand_in_codex
     units = json.loads((workspace / "src/ui/ir/manifest.json").read_text(encoding="utf-8"))["units"]
     for unit in units:
-        relative = workbench.unit_output_path(unit["id"])
-        workbench.begin_unit_generation(workspace, unit["id"])
-        write_file(workspace, relative)
-        workbench.mark_unit_in_review(workspace, unit["id"])
-        workbench.append_unit_review(
-            workspace,
-            unit["id"],
-            "approved",
-            reviewer={"type": "subagent", "name": "smoke-reviewer"},
-            evidence=["smoke fixture evidence"],
-            file_scope=[{"path": relative, "startLine": 1, "endLine": 1}],
-            output_hash=check_workspace.unit_output_hash(workspace, unit),
-        )
+        job_id = workbench.start_unit_job(workspace, 4, unit["id"])
+        deadline = time.time() + 30
+        while workbench.JOBS[job_id]["status"] == "running" and time.time() < deadline:
+            time.sleep(0.05)
+        job = workbench.JOBS[job_id]
+        if job["status"] != "done":
+            raise RuntimeError("unit %s job ended %s: %s" % (unit["id"], job["status"], job["error"]))
 
 
 def check_cli(workspace, phase, expected, release=False, needle=""):
@@ -72,6 +81,7 @@ def prepare_contract(workspace):
     for phase in range(2, 6):
         for relative in check_workspace.REQUIRED[phase]:
             write_file(workspace, relative)
+    write_file(workspace, "tokens/src/color.json", '{"color": {"primary": {"value": "#2457d6"}}}')
 
 
 def run():
@@ -105,14 +115,15 @@ def run():
             elif phase >= 2:
                 for relative in check_workspace.REQUIRED[phase]:
                     write_file(workspace, relative)
-            if phase == 4:
-                review_units_in_order(workspace)
-                approvals = json.loads(approvals_path.read_text(encoding="utf-8"))
             if phase >= 2:
                 check_cli(workspace, phase, 1, needle="requires gate")
                 gate = "G%d" % (phase - 1)
                 approvals.append(approval(gate))
                 write_json(approvals_path, approvals)
+                if phase == 4:
+                    # Units are generated only after G3, as the workbench enforces.
+                    review_units_in_order(workspace)
+                    approvals = json.loads(approvals_path.read_text(encoding="utf-8"))
                 check_cli(workspace, phase, 0)
                 approvals.append(approval(gate, status="changes-requested"))
                 write_json(approvals_path, approvals)
