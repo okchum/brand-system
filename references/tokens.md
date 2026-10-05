@@ -31,3 +31,7 @@ primitive → semantic → component 是变量依赖层级，不代表 Logo 几�
 确需原生 token 导出时，再实现 Swift/Kotlin 等对应转换并验证；文档样例不等于已完成原生集成。
 
 提供命名空间、包入口、类型、tree-shaking 友好导出（适用时）、版本与兼容策略。不同品牌或子产品不得通过随意覆盖全局变量造成污染。
+
+### 11.5 UI 契约中的 token 引用
+
+`tokens/src/` 是唯一 token SSOT。`config/ui.json` 只能用固定的 `tokenSource: "tokens/src"` 指向它，不能在 UI config、IR manifest 或 unit review 中复制颜色、间距、字体等 token 值。`html-css-js` 与 `react` 是初始 stack profile；没有对应工具链时，交付状态只能为 `preview-only` 或 `handoff-ready`，文档和审阅记录不得声称 native runtime 已实现。

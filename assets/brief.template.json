@@ -39,6 +39,11 @@
     "typefaces": [],
     "licensing": null,
     "techStack": null,
+    "frontend": {
+      "platforms": [],
+      "stackProfile": "html-css-js",
+      "deliveryStatus": "preview-only"
+    },
     "repoConventions": null
   },
   "deliverables": [],

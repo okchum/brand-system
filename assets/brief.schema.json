@@ -13,6 +13,184 @@
       "required": ["brand", "why"],
       "properties": { "brand": { "type": "string" }, "why": { "type": "string" } },
       "additionalProperties": false
+    },
+    "platform": {
+      "enum": ["web", "desktop", "ios", "android"]
+    },
+    "stackProfile": {
+      "enum": ["html-css-js", "react"]
+    },
+    "deliveryStatus": {
+      "enum": ["preview-only", "handoff-ready"]
+    },
+    "frontendConstraints": {
+      "type": "object",
+      "required": ["platforms", "stackProfile", "deliveryStatus"],
+      "properties": {
+        "platforms": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/platform" },
+          "uniqueItems": true
+        },
+        "stackProfile": { "$ref": "#/$defs/stackProfile" },
+        "deliveryStatus": { "$ref": "#/$defs/deliveryStatus" }
+      },
+      "additionalProperties": false
+    },
+    "unitKind": {
+      "enum": ["page-map", "layout", "component", "page", "platform-adaptation"]
+    },
+    "unitStatus": {
+      "enum": ["in-progress", "in-review", "approved", "changes-requested", "completed"]
+    },
+    "approvalStatus": {
+      "enum": ["pending", "approved", "changes-requested"]
+    },
+    "fileRange": {
+      "type": "object",
+      "required": ["path", "startLine", "endLine"],
+      "properties": {
+        "path": { "type": "string", "minLength": 1 },
+        "startLine": { "type": "integer", "minimum": 1 },
+        "endLine": { "type": "integer", "minimum": 1 }
+      },
+      "additionalProperties": false
+    },
+    "manifestUnit": {
+      "type": "object",
+      "required": ["id", "kind", "status", "files", "platforms"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "kind": { "$ref": "#/$defs/unitKind" },
+        "status": { "$ref": "#/$defs/unitStatus" },
+        "files": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 },
+          "minItems": 1,
+          "uniqueItems": true
+        },
+        "platforms": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/platform" },
+          "minItems": 1,
+          "uniqueItems": true
+        },
+        "dependsOn": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 },
+          "uniqueItems": true
+        }
+      },
+      "additionalProperties": false
+    },
+    "uiConfig": {
+      "type": "object",
+      "required": ["version", "platforms", "stackProfile", "tokenSource", "deliveryStatus"],
+      "properties": {
+        "version": { "type": "string", "minLength": 1 },
+        "platforms": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/platform" },
+          "minItems": 1,
+          "uniqueItems": true
+        },
+        "stackProfile": { "$ref": "#/$defs/stackProfile" },
+        "tokenSource": { "const": "tokens/src" },
+        "deliveryStatus": { "$ref": "#/$defs/deliveryStatus" }
+      },
+      "additionalProperties": false
+    },
+    "irManifest": {
+      "type": "object",
+      "required": ["manifestVersion", "hash", "units"],
+      "properties": {
+        "manifestVersion": { "type": "string", "minLength": 1 },
+        "hash": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+        "units": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/manifestUnit" },
+          "minItems": 1
+        }
+      },
+      "additionalProperties": false
+    },
+    "statusUnit": {
+      "type": "object",
+      "required": ["unitId", "status"],
+      "properties": {
+        "unitId": { "type": "string", "minLength": 1 },
+        "status": { "$ref": "#/$defs/unitStatus" },
+        "updatedAt": { "type": "string", "minLength": 1 },
+        "note": { "type": "string", "minLength": 1 }
+      },
+      "additionalProperties": false
+    },
+    "gateApproval": {
+      "type": "object",
+      "required": ["kind", "gate", "status", "scope", "snapshot", "confirmation", "approvedAt"],
+      "properties": {
+        "kind": { "const": "gate" },
+        "gate": { "type": "string", "pattern": "^G[1-5]$" },
+        "status": { "$ref": "#/$defs/approvalStatus" },
+        "scope": { "type": "string", "minLength": 1 },
+        "snapshot": { "type": "string", "minLength": 1 },
+        "confirmation": { "type": "string", "minLength": 1 },
+        "approvedAt": { "type": "string", "minLength": 1 },
+        "version": { "type": "string", "minLength": 1 },
+        "hash": { "type": "string", "minLength": 1 }
+      },
+      "anyOf": [{ "required": ["version"] }, { "required": ["hash"] }],
+      "additionalProperties": false
+    },
+    "unitReviewApproval": {
+      "type": "object",
+      "required": [
+        "kind",
+        "status",
+        "unitId",
+        "manifestVersion",
+        "manifestHash",
+        "fileScope",
+        "reviewer",
+        "conclusion",
+        "evidence"
+      ],
+      "properties": {
+        "kind": { "const": "unit-review" },
+        "status": { "$ref": "#/$defs/unitStatus" },
+        "unitId": { "type": "string", "minLength": 1 },
+        "manifestVersion": { "type": "string", "minLength": 1 },
+        "manifestHash": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+        "fileScope": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/fileRange" },
+          "minItems": 1
+        },
+        "reviewer": {
+          "type": "object",
+          "required": ["type", "name"],
+          "properties": {
+            "type": { "const": "subagent" },
+            "name": { "type": "string", "minLength": 1 }
+          },
+          "additionalProperties": false
+        },
+        "conclusion": {
+          "enum": ["approved", "changes-requested"]
+        },
+        "evidence": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 },
+          "minItems": 1
+        }
+      },
+      "additionalProperties": false
+    },
+    "approvalRecord": {
+      "oneOf": [
+        { "$ref": "#/$defs/gateApproval" },
+        { "$ref": "#/$defs/unitReviewApproval" }
+      ]
     }
   },
   "properties": {
@@ -83,6 +261,7 @@
         "typefaces": { "$ref": "#/$defs/list" },
         "licensing": { "$ref": "#/$defs/text" },
         "techStack": { "$ref": "#/$defs/text" },
+        "frontend": { "$ref": "#/$defs/frontendConstraints" },
         "repoConventions": { "$ref": "#/$defs/text" }
       },
       "additionalProperties": false

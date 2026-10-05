@@ -160,7 +160,11 @@ description: 为一个软件产品建立生产导向的完整品牌系统仓库�
 - 机器测试通过不等于用户批准；用户喜欢也不等于技术验证通过。
 - 不无限扩展方案数量。默认 3 套初始方向，每次修订围绕具体反馈推进。
 
-在 `project/approvals.json` 记录审批，格式为数组，每项 `{gate, status, scope, snapshot, confirmation, approvedAt, version 或 hash}`；`gate` 取 `G1`–`G5`，`status` 取 `pending / approved / changes-requested`，`confirmation` 摘录用户的原话。只追加新记录、不改写旧记录；同一 gate 以最后一条为准，所以用户撤回或要求修改时追加一条 `changes-requested`。没有真实确认时状态保持 `pending`。
+在 `project/approvals.json` 记录审批，格式为数组。`kind: "gate"` 使用兼容字段集合 `{gate, status, scope, snapshot, confirmation, approvedAt, version 或 hash}`；`gate` 取 `G1`–`G5`，`status` 取 `pending / approved / changes-requested`，`confirmation` 摘录用户的原话。`kind: "unit-review"` 必须绑定 `unitId`、`manifestVersion`、`manifestHash`、`fileScope`、subagent reviewer、`conclusion` 和 `evidence`。只追加新记录、不改写旧记录；同一 gate 以最后一条为准，所以用户撤回或要求修改时追加一条 `changes-requested`。没有真实确认时状态保持 `pending`。
+
+产品 UI 的约束新增 `constraints.frontend`，平台只能是 `web`、`desktop`、`ios`、`android`；旧的 `constraints.techStack` 继续可读。初始 stack profile 只有 `html-css-js` 和 `react`，没有工具链时 delivery status 只能是 `preview-only` 或 `handoff-ready`，不能声称 native runtime 已实现。`tokens/src/` 是唯一 token SSOT。
+
+UI 工作单元按页面地图 → 布局 → 复用 → 组件 → 页面 → 平台适配推进；每个 unit 必须启动独立 subagent review。当前 GPT 环境不得显式指定 sonnet、opus、fable；记录 reviewer 名称即可，不在契约中加入模型选择字段。
 
 ---
 

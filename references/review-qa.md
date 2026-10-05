@@ -53,3 +53,12 @@
 单列审美审阅、Logo 辨识、真实设备、原生打包、邮件客户端、商标核查、印刷打样与供应商工艺。没有执行的就是未执行，不用脚本通过代替。
 
 问题级别：blocker、major、minor、observation。不得为了“全绿”修改测试目标或删除失败检查。客观工具不支持的项目标 blocked 并解释；核心 required 阻塞未解决前只能交付候选版本。
+
+### H. UI unit review 契约
+
+`project/approvals.json` 是追加式记录，记录必须带 `kind`：
+
+- `kind: "gate"`：沿用 gate、status、scope、snapshot、confirmation、approvedAt，以及 version 或 hash；gate 只能是 `G1`–`G5`，status 只能是 `pending`、`approved`、`changes-requested`。
+- `kind: "unit-review"`：必须带 `unitId`、`manifestVersion`、`manifestHash`、`fileScope`、`reviewer`、`conclusion`、`evidence` 和 status。`fileScope` 是一个或多个 `{path, startLine, endLine}`；`reviewer.type` 固定为 `subagent`；status 只能是 `in-progress`、`in-review`、`approved`、`changes-requested`、`completed`，conclusion 只能是 `approved`、`changes-requested`。
+
+每个 unit 都必须有自己的 `unit-review` 记录，并绑定同一份 manifest 的版本与 SHA-256 hash。evidence 必须是非空数组，内容可以是测试命令、静态检查结果、差异摘要或证据文件路径。当前 GPT 环境不得显式指定 sonnet、opus、fable；reviewer 记录角色和名称即可，不写模型选择字段。

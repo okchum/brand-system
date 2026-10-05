@@ -1,0 +1,13 @@
+{
+  "schemaVersion": "1.0.0",
+  "phases": [
+    {
+      "phase": 3,
+      "creates": ["config/ui.json"]
+    },
+    {
+      "phase": 4,
+      "creates": ["src/ui/ir/manifest.json"]
+    }
+  ]
+}
