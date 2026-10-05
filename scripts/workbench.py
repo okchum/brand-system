@@ -383,7 +383,9 @@ def unit_overview(path):
                 "reviewer": (review.get("reviewer") or {}).get("name"),
                 "summary": review.get("summary") or "",
                 "evidence": review.get("evidence", []),
-                "current": check_workspace.review_current(path, review, manifest, unit),
+                # Whether the verdict, whatever it is, was given on the output now on disk.
+                "current": check_workspace.review_matches(review, manifest)
+                and review.get("outputHash") == check_workspace.unit_output_hash(path, unit),
             },
             "canGenerate": not phase_blocker and not blocked_by and not busy,
             "canReview": not phase_blocker and state == IN_REVIEW and not busy,

@@ -518,6 +518,9 @@ class UiWorkbenchTest(unittest.TestCase):
                 job = wait_for(workbench.start_review_job(workspace, 4, "page-map"))
             self.assertEqual(job["status"], "done", job)
             self.assertEqual(self.unit_status(workspace, "page-map")["status"], "changes-requested")
+            # The verdict is about the output on disk, so the page must not call it stale.
+            review = workbench.unit_overview(workspace)["units"][0]["review"]
+            self.assertEqual((review["conclusion"], review["current"]), ("changes-requested", True))
 
     def test_unit_job_restores_files_outside_its_unit_and_fails(self):
         with tempfile.TemporaryDirectory() as root:
