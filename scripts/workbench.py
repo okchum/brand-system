@@ -37,7 +37,8 @@ TEMPLATE = ROOT / "assets" / "brief.template.json"
 HTML = (ROOT / "assets" / "workbench.html").read_text(encoding="utf-8")
 DEFAULT_WORKSPACE_DIR = "brand-workspace"
 # One agent run (a phase, a unit generation or a review) is stopped after this many seconds.
-AGENT_TIMEOUT = 600
+# A real codex Phase 1 run took about 9.5 minutes and later phases write more, so 10 minutes cut them off.
+AGENT_TIMEOUT = 1800
 
 
 def page_html():
