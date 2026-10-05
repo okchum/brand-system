@@ -987,6 +987,31 @@ class UiWorkbenchScriptTest(unittest.TestCase):
         self.assertIn("usage:", result.stdout)
 
 
+    def test_script_prints_the_real_address_and_links_the_workspace(self):
+        import urllib.parse
+        import urllib.request
+        with tempfile.TemporaryDirectory() as root:
+            workspace = workbench.init_workspace(Path(root) / "brand", "Tidewell", "Manage feedback")
+            proc = subprocess.Popen([sys.executable, str(ROOT / "scripts/workbench.py"), root, "--port", "0", "--workspace", "brand"],
+                                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            try:
+                url = proc.stdout.readline().split(": ", 1)[1].strip()
+                self.assertNotIn(":0/", url)
+                self.assertEqual(urllib.parse.parse_qs(urllib.parse.urlparse(url).query)["workspace"], [str(workspace)])
+                with urllib.request.urlopen(url) as response:
+                    self.assertEqual(response.status, 200)
+            finally:
+                proc.terminate()
+                proc.communicate(timeout=10)
+
+    def test_workspace_outside_the_directory_is_refused(self):
+        with tempfile.TemporaryDirectory() as root:
+            result = subprocess.run([sys.executable, str(ROOT / "scripts/workbench.py"), root, "--port", "0", "--workspace", "../elsewhere"],
+                                    capture_output=True, text=True, timeout=10)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("启动目录", result.stderr)
+
+
 class UiWorkbenchHttpTest(unittest.TestCase):
     def setUp(self):
         import urllib.request

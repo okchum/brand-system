@@ -3,7 +3,9 @@
 # boundary unless the encoding is declared; the agent prompts here are long lines of Chinese text.
 """Run the browser-first brand-system workspace initializer.
 
-Usage: python3 scripts/workbench.py [DIRECTORY] [--port PORT]
+Usage: python3 scripts/workbench.py [DIRECTORY] [--port PORT] [--open] [--workspace WORKSPACE]
+--open opens the page in the default browser; --workspace makes it open that workspace directly.
+--port 0 picks a free port; the printed address is the one to use.
 The server only writes inside the selected workspace after an explicit UI action.
 """
 import argparse
@@ -15,6 +17,7 @@ import re
 import sys
 import tempfile
 import traceback
+import webbrowser
 import threading
 import time
 import subprocess
@@ -23,7 +26,7 @@ import shutil
 import signal
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, urlencode, urlparse
 
 import check_workspace
 from check_workspace import APPROVED, CHANGES_REQUESTED, IN_PROGRESS, IN_REVIEW, NOT_STARTED
@@ -1370,11 +1373,26 @@ class Handler(BaseHTTPRequestHandler):
         sys.stderr.write("workbench: " + (fmt % args) + "\n")
 
 
+def page_url(port, workspace=None):
+    """The address to open; with a workspace the page loads it straight away (it reads ?workspace=)."""
+    url = "http://127.0.0.1:%d/" % port
+    return url + "?" + urlencode({"workspace": str(workspace)}) if workspace else url
+
+
 def main(argv=None):
-    parser = argparse.ArgumentParser(description=__doc__); parser.add_argument("directory", nargs="?", default="."); parser.add_argument("--port", type=int, default=8765); args = parser.parse_args(argv)
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("directory", nargs="?", default=".")
+    parser.add_argument("--port", type=int, default=8765)
+    parser.add_argument("--open", action="store_true", help="open the page in the default browser")
+    parser.add_argument("--workspace", help="workspace (inside DIRECTORY) the opened page should load")
+    args = parser.parse_args(argv)
     Handler.root = Path(args.directory).expanduser().resolve(); Handler.root.mkdir(parents=True, exist_ok=True)
+    workspace = Handler.workspace_path(args.workspace) if args.workspace else None
     server = ThreadingHTTPServer(("127.0.0.1", args.port), Handler)
-    print("Brand System Workbench: http://127.0.0.1:%d/" % args.port, flush=True)
+    url = page_url(server.server_address[1], workspace)
+    print("Brand System Workbench: " + url, flush=True)
+    if args.open:
+        webbrowser.open(url)  # returns False without a desktop session; the printed address still works
     if threading.current_thread() is threading.main_thread():
         for stop in (signal.SIGTERM, signal.SIGHUP):  # closing the terminal sends SIGHUP
             signal.signal(stop, lambda *_: sys.exit(0))

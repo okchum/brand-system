@@ -30,8 +30,11 @@ ln -s "$PWD" ~/.codex/skills/brand-system    # Codex
 推荐从工作区父目录启动本地工作台，自动扫描当前目录和一级子目录；不需要手工复制 brief 模板：
 
 ```sh
-python3 scripts/workbench.py .
+python3 scripts/workbench.py . --open                         # 启动并打开浏览器
+python3 scripts/workbench.py . --open --workspace brand       # 直接打开已有工作区
 ```
+
+通过 skill 启用时，agent 默认就这样启动工作台并给出地址，生成、审阅和审批都在网页里完成；只有你明确要求、或环境起不了本地服务时才改在聊天里推进。
 
 运行前提：Python 3.9+；生成需要已安装并登录的 `codex` CLI；在设置里选了 Claude Code 的生成或审查需要已安装并登录的 `claude` CLI。
 
