@@ -42,6 +42,13 @@ def current_output_hash(workspace, unit_id):
     return check_workspace.unit_output_hash(Path(workspace), unit)
 
 
+def remove_backup(report):
+    """Delete the temp directory a restore report points at, and nothing else."""
+    saved = Path(re.search(r"保存到 (.+)）", report).group(1))
+    backup = next(parent for parent in saved.parents if parent.name.startswith("brand-system-restore-"))
+    shutil.rmtree(backup)
+
+
 def wait_for(job_id):
     deadline = time.time() + 5
     while workbench.JOBS[job_id]["status"] == "running" and time.time() < deadline:
@@ -840,7 +847,7 @@ class UiWorkbenchRobustnessTest(unittest.TestCase):
             self.assertEqual(outside.read_text(encoding="utf-8"), "keep me")
             self.assertFalse((workspace / "project/approvals.json").is_symlink())
             self.assertEqual((workspace / "project/approvals.json").read_text(encoding="utf-8"), "[]")
-            shutil.rmtree(Path(re.search(r"保存到 (.+)）", reported[0]).group(1)).parents[1])
+            remove_backup(reported[0])
 
     def test_restore_does_not_write_through_a_swapped_root(self):
         with tempfile.TemporaryDirectory() as root, tempfile.TemporaryDirectory() as elsewhere:
@@ -857,6 +864,46 @@ class UiWorkbenchRobustnessTest(unittest.TestCase):
             self.assertFalse((Path(elsewhere) / "sub").exists())
             self.assertFalse((workspace / "project").is_symlink())
             self.assertEqual((workspace / "project/sub/a.txt").read_text(encoding="utf-8"), "a")
+
+    def test_restore_never_deletes_through_a_linked_parent(self):
+        with tempfile.TemporaryDirectory() as root, tempfile.TemporaryDirectory() as elsewhere:
+            workspace = Path(root)
+            (workspace / "src/ui/ir").mkdir(parents=True)
+            (workspace / "src/ui/ir/manifest.json").write_text("{}", encoding="utf-8")
+            (Path(elsewhere) / "ir/sub").mkdir(parents=True)
+            (Path(elsewhere) / "ir/precious.txt").write_text("keep", encoding="utf-8")
+            (Path(elsewhere) / "ir/sub/f").write_text("keep", encoding="utf-8")
+            before = workbench._snapshot(workspace, ("src/ui/ir",))
+            shutil.rmtree(workspace / "src/ui")
+            (workspace / "src/ui").symlink_to(elsewhere)
+            workbench._restore(workspace, ("src/ui/ir",), before)
+            self.assertEqual((Path(elsewhere) / "ir/precious.txt").read_text(encoding="utf-8"), "keep")
+            self.assertEqual((Path(elsewhere) / "ir/sub/f").read_text(encoding="utf-8"), "keep")
+            self.assertFalse((workspace / "src/ui").is_symlink())
+            self.assertEqual((workspace / "src/ui/ir/manifest.json").read_text(encoding="utf-8"), "{}")
+
+    def test_jobs_refuse_a_protected_root_that_is_a_link(self):
+        with tempfile.TemporaryDirectory() as root, tempfile.TemporaryDirectory() as elsewhere:
+            workspace = Path(root)
+            (workspace / "project").symlink_to(elsewhere)
+            with self.assertRaisesRegex(ValueError, "project"):
+                workbench._require_real_roots(workspace, ("project/approvals.json",))
+            workbench._require_real_roots(workspace, ("config",))
+
+    def test_backups_of_a_link_and_a_same_named_file_do_not_collide(self):
+        with tempfile.TemporaryDirectory() as root:
+            workspace = Path(root)
+            (workspace / "project").mkdir()
+            before = workbench._snapshot(workspace, ("project",))
+            (workspace / "project/x").symlink_to("target")
+            (workspace / "project/x.symlink.txt").mkdir()
+            (workspace / "project/x.symlink.txt/f").write_text("real", encoding="utf-8")
+            reported = workbench._restore(workspace, ("project",), before)
+            saved = sorted(Path(m.group(1)).read_bytes() for m in (re.search(r"保存到 (.+)）", r) for r in reported))
+            self.assertEqual(saved, [b"real", b"target"])
+            # Directories the job created may stay empty; no file or link it added does.
+            self.assertEqual([p for p in (workspace / "project").rglob("*") if p.is_file() or p.is_symlink()], [])
+            remove_backup(reported[0])
 
     def test_restore_brings_back_an_existing_symlink_as_a_symlink(self):
         with tempfile.TemporaryDirectory() as root:
@@ -882,7 +929,7 @@ class UiWorkbenchRobustnessTest(unittest.TestCase):
             self.assertEqual((workspace / "project/approvals.json").read_text(encoding="utf-8"), "[]")
             copy = Path(re.search(r"保存到 (.+)）", reported).group(1))
             self.assertEqual(copy.read_text(encoding="utf-8"), '["edited meanwhile"]')
-            shutil.rmtree(copy.parents[1])
+            remove_backup(reported)
 
     def test_file_count_is_capped(self):
         with tempfile.TemporaryDirectory() as root:

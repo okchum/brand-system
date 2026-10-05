@@ -773,6 +773,7 @@ def start_generation(path, phase):
         prompt = _phase_prompt(phase, choice)
         job_id = _create_job(path, prompt)
         try:
+            _require_real_roots(path, PHASE_PROTECTED_ROOTS)
             before = _snapshot(path, PHASE_PROTECTED_ROOTS)
             status_before = (path / "project/status.json").read_bytes()
         except Exception:
@@ -852,30 +853,63 @@ PROTECTED_ROOTS = ("brand.brief.json", "project", "config", "tokens", "src/ui/ir
 PHASE_PROTECTED_ROOTS = ("project/approvals.json", "src/ui/ir", "src/ui/units")
 
 
+def _linked_part(path, rel):
+    """The first component of rel (relative to path) that is a symlink, or None. Nothing here follows links."""
+    parts = Path(rel).parts
+    for depth in range(1, len(parts) + 1):
+        part = Path(*parts[:depth])
+        if os.path.islink(path / part):
+            return part
+    return None
+
+
+def _require_real_roots(path, roots):
+    """Jobs only run when the protected roots are real directories: what sits behind a link cannot be restored safely."""
+    linked = sorted({str(part) for part in (_linked_part(path, root) for root in roots) if part})
+    if linked:
+        raise ValueError("受保护的目录不能是链接：%s；请换成真实目录后再运行任务" % "、".join(linked))
+
+
 def _snapshot(path, roots, excluded=None):
-    """Bytes of every file under the protected roots; a symlink is recorded as ("symlink", its target), never followed,
-    so a job that swaps a file or a whole root for a link to somewhere else is seen as a change."""
+    """Bytes of every file under the protected roots. Links are never followed: a link anywhere on the way is
+    recorded as ("symlink", its target), so a job that swaps a file or a directory for a link shows up as a change."""
     files = {}
+
+    def record(item):
+        rel = str(item.relative_to(path))
+        if os.path.islink(item):
+            files[rel] = ("symlink", os.readlink(item))
+        elif item.is_file():
+            files[rel] = item.read_bytes()
+
     for root in roots:
+        linked = _linked_part(path, root)
+        if linked is not None:
+            record(path / linked)
+            continue
         base = path / root
-        items = [base] if base.is_file() or base.is_symlink() else base.rglob("*") if base.is_dir() else []
-        for item in items:
-            if excluded and item.is_relative_to(excluded):
+        if not base.is_dir():
+            record(base)
+            continue
+        for directory, dirnames, filenames in os.walk(base):  # followlinks=False: linked dirs are listed, not entered
+            here = Path(directory)
+            if excluded and here.is_relative_to(excluded):
+                dirnames[:] = []
                 continue
-            rel = str(item.relative_to(path))
-            if item.is_symlink():
-                files[rel] = ("symlink", os.readlink(item))
-            elif item.is_file():
-                files[rel] = item.read_bytes()
+            for name in filenames + [name for name in dirnames if os.path.islink(here / name)]:
+                if not (excluded and (here / name).is_relative_to(excluded)):
+                    record(here / name)
     return files
 
 
 def _restore(path, roots, before, excluded=None):
-    """Put protected files back as they were before a job. The job may not be the only writer (the user can edit
+    """Put protected entries back as they were before a job. The job may not be the only writer (the user can edit
     in another program meanwhile), so each changed version is copied out first and its location reported."""
     after = _snapshot(path, roots, excluded)
     changed = sorted(rel for rel in set(before) | set(after) if before.get(rel) != after.get(rel))
-    backup = Path(tempfile.mkdtemp(prefix="brand-system-restore-")) if any(rel in after for rel in changed) else None
+    if not changed:
+        return []
+    backup = Path(tempfile.mkdtemp(prefix="brand-system-restore-"))
     reported = []
     # Copy everything out before touching anything: removing a replaced directory below also removes its files.
     for rel in changed:
@@ -883,26 +917,30 @@ def _restore(path, roots, before, excluded=None):
             reported.append(rel)
             continue
         link = isinstance(after[rel], tuple)
-        kept = backup / (rel + ".symlink.txt" if link else rel)
+        kept = backup / ("links" if link else "files") / rel
         kept.parent.mkdir(parents=True, exist_ok=True)
         kept.write_bytes(os.fsencode(after[rel][1]) if link else after[rel])
         reported.append("%s（改动后的版本已保存到 %s）" % (rel, kept))
-    root = path.resolve()
-    for rel in changed:  # sorted, so a swapped parent is removed before its children are written back
-        target = path / rel
-        if target.is_symlink() or target.is_file():
-            target.unlink()
-        elif target.is_dir():
-            shutil.rmtree(target)
-        if rel not in before:
-            continue
-        target.parent.mkdir(parents=True, exist_ok=True)
-        if not target.parent.resolve().is_relative_to(root):
-            raise RuntimeError("%s 的上级目录指向工作区以外，没有恢复" % rel)
-        if isinstance(before[rel], tuple):
-            os.symlink(before[rel][1], target)
-        else:
-            target.write_bytes(before[rel])
+    try:
+        for rel in changed:  # sorted, so a swapped parent is handled before anything under it
+            target = path / rel
+            linked = _linked_part(path, Path(rel).parent) if Path(rel).parent != Path(".") else None
+            if linked is not None:
+                # Only reachable if a parent link was not itself in the change set; never act through it.
+                raise RuntimeError("%s 位于链接 %s 之下，没有恢复" % (rel, linked))
+            if os.path.islink(target) or target.is_file():
+                target.unlink()
+            elif target.is_dir():
+                shutil.rmtree(target)
+            if rel not in before:
+                continue
+            target.parent.mkdir(parents=True, exist_ok=True)
+            if isinstance(before[rel], tuple):
+                os.symlink(before[rel][1], target)
+            else:
+                target.write_bytes(before[rel])
+    except Exception as exc:
+        raise RuntimeError("恢复没有完成（%s）；改动前后的版本保存在 %s" % (exc, backup))
     return reported
 
 
@@ -1118,6 +1156,7 @@ def start_unit_job(path, phase, unit_id):
         try:
             # Snapshot first: if it fails nothing has changed yet. begin_unit_generation then rewrites
             # status.json itself, and that write must count as "before" or the restore would undo it.
+            _require_real_roots(path, PROTECTED_ROOTS)
             before = _protected_snapshot(path, unit_id)
             begin_unit_generation(path, unit_id)
             before["project/status.json"] = (path / "project/status.json").read_bytes()
