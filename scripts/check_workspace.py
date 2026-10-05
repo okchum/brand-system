@@ -363,10 +363,12 @@ def unit_output_hash(ws, unit):
 
 def review_current(ws, review, manifest, unit):
     """An approved review still vouches for the unit: same manifest and same output bytes."""
+    digest = unit_output_hash(ws, unit)
     return (
-        review_matches(review, manifest)
+        digest is not None
+        and review_matches(review, manifest)
         and review.get("conclusion") == "approved"
-        and review.get("outputHash") == unit_output_hash(ws, unit)
+        and review.get("outputHash") == digest
     )
 
 

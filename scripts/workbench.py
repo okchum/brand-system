@@ -331,7 +331,10 @@ def append_unit_review(workspace, unit_id, conclusion, reviewer, evidence, file_
                 raise ValueError("fileScope 必须包含有效的 path 和行号")
             if scope["path"] not in unit["files"]:
                 raise ValueError("fileScope 只能引用该 unit 的输出文件")
-        if output_hash != check_workspace.unit_output_hash(workspace, unit):
+        digest = check_workspace.unit_output_hash(workspace, unit)
+        if digest is None:
+            raise ValueError("outputHash 无法核对：unit 的输出文件不存在")
+        if output_hash != digest:
             raise ValueError("outputHash 与当前输出不一致：审查的不是这一版输出")
         record = {
             "kind": "unit-review",

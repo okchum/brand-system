@@ -260,6 +260,24 @@ class UiWorkbenchTest(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "page-map"):
                 workbench.begin_unit_generation(workspace, "layout")
 
+    def test_missing_output_never_matches_an_output_hash(self):
+        with tempfile.TemporaryDirectory() as root:
+            workspace = self.init(root)
+            write_output(workspace, "page-map")
+            workbench.begin_unit_generation(workspace, "page-map")
+            workbench.mark_unit_in_review(workspace, "page-map")
+            (workspace / workbench.unit_output_path("page-map")).unlink()
+            with self.assertRaisesRegex(ValueError, "outputHash"):
+                workbench.append_unit_review(
+                    workspace, "page-map", "approved", reviewer=REVIEWER, evidence=["evidence.json"],
+                    file_scope=[{"path": workbench.unit_output_path("page-map"), "startLine": 1, "endLine": 1}],
+                    output_hash=None,
+                )
+            manifest = self.read(root, "src/ui/ir/manifest.json")
+            unit = manifest["units"][0]
+            review = {"manifestVersion": manifest["manifestVersion"], "manifestHash": manifest["hash"], "conclusion": "approved"}
+            self.assertFalse(check_workspace.review_current(workspace, review, manifest, unit))
+
     def test_dependency_output_changed_after_review_is_not_satisfied(self):
         with tempfile.TemporaryDirectory() as root:
             workspace = self.init(root)
