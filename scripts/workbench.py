@@ -11,7 +11,9 @@ import copy
 import hashlib
 import json
 import os
+import re
 import sys
+import tempfile
 import threading
 import time
 import subprocess
@@ -30,10 +32,11 @@ HTML = r'''<!doctype html>
 <html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Brand System Workbench</title>
 <style>
-:root{font:16px/1.5 system-ui,sans-serif;color:#17202a;background:#f5f7fb}body{max-width:980px;margin:0 auto;padding:32px}main{background:#fff;border:1px solid #dfe5ee;border-radius:16px;padding:28px;box-shadow:0 8px 30px #17202a12}.deliverables{margin-top:16px;padding:18px;border:1px solid #cbd8ef;border-radius:12px;background:#f7f9ff}.deliverables h3{margin:0 0 12px}.deliverable-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:10px}.deliverable-card{display:block;padding:12px;border:1px solid #dfe5ee;border-radius:9px;background:#fff;color:#17202a;text-decoration:none}.deliverable-card:hover{border-color:#315efb;background:#f8faff}.deliverable-card strong{display:block;color:#315efb}.deliverable-card small{color:#687386}h1{margin-top:0}label{display:block;margin:14px 0 6px;font-weight:650}input,textarea,select{width:100%;box-sizing:border-box;padding:10px;border:1px solid #c7d0dc;border-radius:8px;font:inherit}input[readonly]{background:#f8fafc}.row{display:flex;gap:10px;align-items:center}.row input{flex:1}.row button{flex:0 0 auto;min-width:110px;margin-top:0;height:46px}button{margin-top:18px;padding:11px 16px;border:0;border-radius:8px;background:#315efb;color:#fff;font-weight:700;cursor:pointer}button:disabled{opacity:.48;cursor:wait}button.secondary{background:#e8edf5;color:#17202a}.card{border:1px solid #dfe5ee;border-radius:10px;padding:16px;margin:12px 0}.muted{color:#687386}.error{color:#a32626}.ok{color:#166534;white-space:pre-wrap}.log,.phase-log{background:#111827;color:#d1fae5;border-radius:10px;padding:14px;min-height:60px;max-height:180px;overflow:auto;white-space:pre-wrap;user-select:text;font:13px/1.55 ui-monospace,monospace}.phase{border:1px solid #dfe5ee;border-radius:10px;margin:12px 0;overflow:hidden}.phase-header{display:block;width:100%;margin:0;border:0;border-radius:0;background:#eef2f7;color:#17202a;text-align:left}.phase.current .phase-header{background:#e8efff;color:#19327a;border-left:4px solid #315efb}.phase.current .phase-header:hover{background:#dce7ff}.phase-header:disabled{cursor:not-allowed;color:#7d8796;background:#f7f8fa}.phase-body{padding:16px;background:#fff}.phase-body[hidden]{display:none}.phase-actions{display:flex;gap:10px;align-items:center;flex-wrap:wrap}.review-link{font-weight:700;color:#315efb}.phase-actions button{margin-top:0}.phase-check{white-space:pre-wrap;margin:10px 0 0;color:#a32626}.phase-check.ok{color:#166534}dialog{border:1px solid #dfe5ee;border-radius:12px;padding:22px;width:min(680px,calc(100% - 44px));box-shadow:0 20px 60px #17202a33}dialog::backdrop{background:#17202a66}.dialog-actions{display:flex;gap:10px;justify-content:flex-end}.dialog-actions button{margin-top:12px}.unit-row{border:1px solid #dfe5ee;border-radius:10px;padding:12px 14px;margin:8px 0}.unit-row h5{margin:0 0 4px;font-size:15px}.unit-row p{margin:4px 0}.unit-actions{display:flex;gap:10px;flex-wrap:wrap;align-items:center}.unit-actions button{margin-top:6px}
+:root{font:16px/1.5 system-ui,sans-serif;color:#17202a;background:#f5f7fb}body{max-width:980px;margin:0 auto;padding:32px}main{background:#fff;border:1px solid #dfe5ee;border-radius:16px;padding:28px;box-shadow:0 8px 30px #17202a12}.deliverables{margin-top:16px;padding:18px;border:1px solid #cbd8ef;border-radius:12px;background:#f7f9ff}.deliverables h3{margin:0 0 12px}.deliverable-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:10px}.deliverable-card{display:block;padding:12px;border:1px solid #dfe5ee;border-radius:9px;background:#fff;color:#17202a;text-decoration:none}.deliverable-card:hover{border-color:#315efb;background:#f8faff}.deliverable-card strong{display:block;color:#315efb}.deliverable-card small{color:#687386}h1{margin-top:0}label{display:block;margin:14px 0 6px;font-weight:650}input,textarea,select{width:100%;box-sizing:border-box;padding:10px;border:1px solid #c7d0dc;border-radius:8px;font:inherit}input[readonly]{background:#f8fafc}.row{display:flex;gap:10px;align-items:center}.row input{flex:1}.row button{flex:0 0 auto;min-width:110px;margin-top:0;height:46px}button{margin-top:18px;padding:11px 16px;border:0;border-radius:8px;background:#315efb;color:#fff;font-weight:700;cursor:pointer}button:disabled{opacity:.48;cursor:wait}button.secondary{background:#e8edf5;color:#17202a}.card{border:1px solid #dfe5ee;border-radius:10px;padding:16px;margin:12px 0}.muted{color:#687386}.error{color:#a32626}.ok{color:#166534;white-space:pre-wrap}.log,.phase-log{background:#111827;color:#d1fae5;border-radius:10px;padding:14px;min-height:60px;max-height:180px;overflow:auto;white-space:pre-wrap;user-select:text;font:13px/1.55 ui-monospace,monospace}.phase{border:1px solid #dfe5ee;border-radius:10px;margin:12px 0;overflow:hidden}.phase-header{display:block;width:100%;margin:0;border:0;border-radius:0;background:#eef2f7;color:#17202a;text-align:left}.phase.current .phase-header{background:#e8efff;color:#19327a;border-left:4px solid #315efb}.phase.current .phase-header:hover{background:#dce7ff}.phase-header:disabled{cursor:not-allowed;color:#7d8796;background:#f7f8fa}.phase-body{padding:16px;background:#fff}.phase-body[hidden]{display:none}.phase-actions{display:flex;gap:10px;align-items:center;flex-wrap:wrap}.review-link{font-weight:700;color:#315efb}.phase-actions button{margin-top:0}.phase-check{white-space:pre-wrap;margin:10px 0 0;color:#a32626}.phase-check.ok{color:#166534}dialog{border:1px solid #dfe5ee;border-radius:12px;padding:22px;width:min(680px,calc(100% - 44px));box-shadow:0 20px 60px #17202a33}dialog::backdrop{background:#17202a66}.dialog-actions{display:flex;gap:10px;justify-content:flex-end}.dialog-actions button{margin-top:12px}.unit-row{border:1px solid #dfe5ee;border-radius:10px;padding:12px 14px;margin:8px 0}.unit-row h5{margin:0 0 4px;font-size:15px}.unit-row p{margin:4px 0}.unit-actions{display:flex;gap:10px;flex-wrap:wrap;align-items:center}.unit-actions button{margin-top:6px}fieldset.agents{margin:16px 0 0;padding:12px 16px 16px;border:1px solid #dfe5ee;border-radius:10px}fieldset.agents legend{font-weight:650;padding:0 6px}.agent-row{display:grid;grid-template-columns:3em minmax(0,1fr) minmax(0,1.4fr) minmax(0,1fr);gap:10px;align-items:center;margin-top:10px}@media (max-width:640px){.agent-row{grid-template-columns:1fr}}
 </style><body><main><h1>Brand System Workbench</h1><p class="muted">在同一个页面决定生成位置、产品信息，以及 AI 是否读取已有源码或文档。</p><p id="notice" class="error"></p>
 <section id="setup"><h2>初始化品牌工作区</h2><label>生成目录</label><p class="muted">品牌系统文件会写入这里。默认使用 workbench 启动目录，推荐生成到它下面的 <code>brand</code>。</p><div class="row"><input id="outputPath" aria-label="生成目录" readonly><button id="chooseOutputButton" class="secondary">浏览选择</button></div><p id="outputHint" class="muted"></p>
 <label>产品名称</label><input id="official" placeholder="例如 Tidewell"><label>产品功能和一句话描述</label><textarea id="oneLiner" rows="3" placeholder="例如：帮助独立团队管理客户反馈、路线图和发布计划"></textarea><label>主要功能（可选，用逗号分隔）</label><input id="capabilities" placeholder="例如：客户反馈、路线图、发布计划"><label>技术栈</label><select id="stackProfile"><option value="html-css-js">html-css-js</option><option value="react">react</option></select><label>目标平台（可多选）</label><select id="platforms" multiple size="4"><option value="web" selected>web</option><option value="desktop">desktop</option><option value="ios">ios</option><option value="android">android</option></select>
+<fieldset class="agents"><legend>可选：UI 工作单元用哪个 AI</legend><p class="muted">留空就用引擎自己的默认模型和推理强度。推荐生成用 codex、审查用 Claude Code：换一家的模型来审，更容易发现生成模型自己的盲区。各阶段的整体生成始终用 codex 默认配置。</p><div class="agent-row"><b>生成</b><select id="agentGenerationEngine" aria-label="生成引擎"><option value="codex">codex</option><option value="claude">Claude Code</option></select><input id="agentGenerationModel" aria-label="生成模型" placeholder="模型（留空 = 默认）"><select id="agentGenerationEffort" aria-label="生成推理强度"></select></div><div class="agent-row"><b>审查</b><select id="agentReviewEngine" aria-label="审查引擎"><option value="codex">codex</option><option value="claude">Claude Code</option></select><input id="agentReviewModel" aria-label="审查模型" placeholder="模型（留空 = 默认）"><select id="agentReviewEffort" aria-label="审查推理强度"></select></div></fieldset>
 <label>可选：AI 参考资料目录</label><p class="muted">可选择源码、产品文档或设计资料所在目录。它只读，不会成为生成目录，也不会被改写。</p><div class="row"><input id="sourcePath" aria-label="AI 参考资料目录" readonly placeholder="未选择，AI 只使用本次填写的信息"><button id="chooseSourceButton" class="secondary">浏览选择</button></div><p id="sourceHint" class="muted"></p>
 <button id="initButton">创建工作区并打开阶段 0</button><p id="result"></p></section>
 <section id="workspace"><h2>工作区状态</h2><div id="state"><p class="muted">创建或选择工作区后，当前阶段会显示在这里。</p></div><div id="uiContext" class="card" aria-live="polite"><p class="muted">UI unit 状态会显示在这里。</p></div><div id="phases"></div></section></main>
@@ -49,10 +52,14 @@ function confirmChooser(){const o=$('#chooserList').selectedOptions[0];if(!o)ret
 async function checkSourcePath(){const value=$('#sourcePath').value.trim();if(!value){$('#sourceHint').textContent='未选择参考资料目录。';return}try{log('正在读取参考资料目录：'+value,0);const j=await get('/api/scan?path='+encodeURIComponent(value));$('#sourceHint').textContent='已找到 '+j.fileCount+' 个可读取文件，不会写入此目录。';log('参考资料读取准备完成，共 '+j.fileCount+' 个文件。',0)}catch(e){$('#sourceHint').className='error';$('#sourceHint').textContent=e.message;log('参考资料读取失败：'+e.message,0)}}
 function phaseInstruction(phase){return ['先补全 brief、环境、策略和范围文件，再检查进入 Phase 1。','先点击“生成 Phase 1 方向”，查看三套方案后选择 A/B/C，再记录 G1。','先确认 G1；然后点击“生成并检查 Phase 2”，系统会生成 review/02-identity.html、BRAND_SYSTEM.md、config/brand.json 及身份文档。','先查看 Phase 3 系统审阅页并确认 G3，再生成或进入 Phase 4。','先在下方按顺序生成并审查全部 UI 工作单元，再生成 Phase 4 资产、查看审阅页并确认 G4，然后进入 Phase 5。','先生成 Phase 5 发布交付物，再检查最终交付物。'][phase]||'先完成当前阶段标注的交付物，再重新检查。'}
 function updateUrl(phase,replace=false){const u=new URL(location.href);u.searchParams.set('workspace',current);u.searchParams.set('phase',String(phase));(replace?history.replaceState:history.pushState).call(history,{},'',u)}
-async function initWorkspace(){const output=$('#outputPath').value,source=$('#sourcePath').value.trim(),existing=$('#outputPath').dataset.workspace==='true';const capabilities=$('#capabilities').value.split(/[,，]/).map(x=>x.trim()).filter(Boolean);const platforms=Array.from($('#platforms').selectedOptions).map(x=>x.value);try{if(existing){current=output;await loadState();log('已打开已有品牌工作区。',activePhase);return}log('开始初始化，生成目录：'+output,0);if(source)log('将读取参考资料：'+source,0);const j=await get('/api/init',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({path:output,official:$('#official').value,oneLiner:$('#oneLiner').value,capabilities,sourcePath:source,stackProfile:$('#stackProfile').value,platforms})});current=j.path;updateUrl(0);log('已写入阶段 0 文件。',0);await loadState()}catch(e){$('#result').className='error';$('#result').textContent=e.message;log('初始化失败：'+e.message,0)}}
+async function initWorkspace(){const output=$('#outputPath').value,source=$('#sourcePath').value.trim(),existing=$('#outputPath').dataset.workspace==='true';const capabilities=$('#capabilities').value.split(/[,，]/).map(x=>x.trim()).filter(Boolean);const platforms=Array.from($('#platforms').selectedOptions).map(x=>x.value);try{if(existing){current=output;await loadState();log('已打开已有品牌工作区。',activePhase);return}log('开始初始化，生成目录：'+output,0);if(source)log('将读取参考资料：'+source,0);const j=await get('/api/init',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({path:output,official:$('#official').value,oneLiner:$('#oneLiner').value,capabilities,sourcePath:source,stackProfile:$('#stackProfile').value,platforms,agents:agentSettings()})});current=j.path;updateUrl(0);log('已写入阶段 0 文件。',0);await loadState()}catch(e){$('#result').className='error';$('#result').textContent=e.message;log('初始化失败：'+e.message,0)}}
 function renderPhases(currentPhase){activePhase=currentPhase;const names=['发现与计划','三套方向','品牌身份','设计系统','资产与平台','交付与发布'];const desc=['完善 brief、环境、策略和范围。','生成三套真正不同的方向并准备 G1。','完成 Logo、颜色、字体和身份规范。','完成 tokens、组件和无障碍规范。','按工作单元生成产品界面，再生成平台资产、图标和导出清单。','完成 QA、交接和发布包。'];const box=$('#phases');box.replaceChildren();for(let i=0;i<6;i++){const panel=document.createElement('section');panel.className='phase '+(i===currentPhase?'current':'');const header=document.createElement('button');header.className='phase-header';header.textContent=(i<currentPhase?'✓ ':i===currentPhase?'● ':'🔒 ')+'Phase '+i+' · '+names[i]+' · '+desc[i];header.disabled=i>currentPhase;const body=document.createElement('div');body.className='phase-body';const actions=i===currentPhase&&i<=5?((i===1?'<button id="generateButton">生成 Phase 1 方向</button><div id="reviewGate" hidden><a class="review-link" target="_blank" rel="noopener" href="/preview?path='+encodeURIComponent(current)+'&file=review/01-directions.html">查看三套方向</a><label class="direction-choice">选择方向 <select id="directionChoice"><option value="A">A</option><option value="B">B</option><option value="C">C</option></select></label><button id="approveProgressButton">选择方向并进入 Phase 2</button></div>':'')+(i===2?'<button id="progressButton">生成 Phase 2 身份并检查 → Phase 3</button><div id="reviewGate2" hidden><a class="review-link" target="_blank" rel="noopener" href="/preview?path='+encodeURIComponent(current)+'&file=review/02-identity.html">查看 Phase 2 身份</a><button id="approveG2Button">确认 G2 并进入 Phase 3</button></div>':'')+(i===3?'<button id="progressButton">生成 Phase 3 系统并检查 → Phase 4</button><div id="reviewGate3" hidden><a class="review-link" target="_blank" rel="noopener" href="/preview?path='+encodeURIComponent(current)+'&file=review/03-system.html">查看 Phase 3 系统</a><button id="approveG3Button">确认 G3 并进入 Phase 4</button></div>':'')+(i===4?'<button id="progressButton">生成 Phase 4 资产并检查 → Phase 5</button><div id="reviewGate4" hidden><a class="review-link" target="_blank" rel="noopener" href="/preview?path='+encodeURIComponent(current)+'&file=review/04-assets.html">查看 Phase 4 资产</a><button id="approveG4Button">确认 G4 并进入 Phase 5</button></div><div id="unitPanel" aria-live="polite"></div>':'')+(i===5?'<button id="progressButton">生成 Phase 5 发布包</button><div id="reviewGate5" class="deliverables" hidden><h3>Phase 5 交付物</h3><p class="muted">生成完成后，从这里查看和交接品牌系统。</p><div class="deliverable-grid"><a class="deliverable-card" target="_blank" rel="noopener" href="/preview?path='+encodeURIComponent(current)+'&file=review/05-release.html"><strong>发布审阅页</strong><small>review/05-release.html</small></a><a class="deliverable-card" target="_blank" rel="noopener" href="/preview?path='+encodeURIComponent(current)+'&file=CHANGELOG.md"><strong>变更记录</strong><small>CHANGELOG.md</small></a><a class="deliverable-card" target="_blank" rel="noopener" href="/preview?path='+encodeURIComponent(current)+'&file=docs/handoff-by-role.md"><strong>交接文档</strong><small>docs/handoff-by-role.md</small></a><a class="deliverable-card" target="_blank" rel="noopener" href="/preview?path='+encodeURIComponent(current)+'&file=reports/qa-report.md"><strong>QA 报告</strong><small>reports/qa-report.md</small></a></div></div>':'')+(i===0?'<button id="progressButton">检查并进入 Phase 1</button>':'')+'<pre id="phaseCheck-'+i+'" class="phase-check"></pre>'):'' ;body.innerHTML='<p class="muted">'+(i<currentPhase?'已完成，可点击标题回看。':i===currentPhase?'当前阶段，完成检查后进入下一阶段。':'尚未到达，完成前置阶段后解锁。')+'</p>'+(i>0&&i<=5&&i===currentPhase?'<p id=\"phaseJobStatus\" class=\"muted\" aria-live=\"polite\"></p>':'')+actions+(i===1&&currentPhase>1?'<div class=\"phase-actions\"><label>补录 G1 方向 <select id=\"historyDirectionChoice\"><option value=\"A\">A</option><option value=\"B\">B</option><option value=\"C\">C</option></select></label><button id=\"approveHistoryButton\" class=\"secondary\">记录 G1 并解锁后续生成</button></div>':'')+(i===2&&currentPhase>2?'<div class="phase-actions"><a class="review-link" target="_blank" rel="noopener" href="/preview?path='+encodeURIComponent(current)+'&file=review/02-identity.html">查看 Phase 2 身份</a><button id="approveHistoryG2Button" class="secondary">记录 G2 并解锁后续生成</button></div>':'')+(i===3&&currentPhase>3?'<div class="phase-actions"><a class="review-link" target="_blank" rel="noopener" href="/preview?path='+encodeURIComponent(current)+'&file=review/03-system.html">查看 Phase 3 系统</a><button id="approveHistoryG3Button" class="secondary">记录 G3 并解锁后续生成</button></div>':'')+(i===4&&currentPhase>4?'<div class="phase-actions"><a class="review-link" target="_blank" rel="noopener" href="/preview?path='+encodeURIComponent(current)+'&file=review/04-assets.html">查看 Phase 4 资产</a><button id="approveHistoryG4Button" class="secondary">记录 G4 并解锁后续生成</button></div>':'')+'<h4>Phase '+i+' 活动日志</h4><div id="phaseLog-'+i+'" class="phase-log" aria-live="polite">'+phaseLogs[i].join('\n')+'</div>';if(i!==currentPhase)body.hidden=true;header.addEventListener('click',()=>{if(i<=currentPhase)body.hidden=!body.hidden});panel.append(header,body);box.appendChild(panel)}}
-async function loadState(){if(!current)return;try{const j=await get('/api/state?path='+encodeURIComponent(current));const phase=Number(j.phase);$('#state').innerHTML='<div class="card"><b>'+esc(j.path)+'</b><br>阶段 '+phase+' · '+esc(j.state)+'<br>下一步：'+esc(phaseInstruction(phase))+'</div>';const overview=j.uiUnits||{units:[]};const currentUnit=overview.units.find(x=>x.id===overview.currentUnit);$('#uiContext').innerHTML='<b>UI workflow</b><br>stack: '+esc(j.uiConfig?.stackProfile||'未设置')+' · platform: '+esc((j.uiConfig?.platforms||[]).join(', ')||'未设置')+'<br>当前 unit: '+(overview.units.length?(currentUnit?esc(UNIT_LABELS[currentUnit.id]||currentUnit.id)+' · '+esc(UNIT_STATUS[currentUnit.status]||currentUnit.status):'全部已通过'):'无');renderPhases(phase);renderUnits(overview);if(j.activeJob&&!activeJob){activeJob=j.activeJob.id;pollErrors=0;activeJobPhase=phase;activeJobUnit=j.activeJob.unitId||'';pollJob()}updateUrl(phase,true);log('当前进度：阶段 '+phase+' · '+j.state,phase)}catch(e){$('#state').textContent=e.message}}
+async function loadState(){if(!current)return;try{const j=await get('/api/state?path='+encodeURIComponent(current));const phase=Number(j.phase);$('#state').innerHTML='<div class="card"><b>'+esc(j.path)+'</b><br>阶段 '+phase+' · '+esc(j.state)+'<br>下一步：'+esc(phaseInstruction(phase))+'</div>';const overview=j.uiUnits||{units:[]};const currentUnit=overview.units.find(x=>x.id===overview.currentUnit);$('#uiContext').innerHTML='<b>UI workflow</b><br>stack: '+esc(j.uiConfig?.stackProfile||'未设置')+' · platform: '+esc((j.uiConfig?.platforms||[]).join(', ')||'未设置')+'<br>'+agentSummary(j.uiConfig?.agents)+'<br>当前 unit: '+(overview.units.length?(currentUnit?esc(UNIT_LABELS[currentUnit.id]||currentUnit.id)+' · '+esc(UNIT_STATUS[currentUnit.status]||currentUnit.status):'全部已通过'):'无');renderPhases(phase);renderUnits(overview);if(j.activeJob&&!activeJob){activeJob=j.activeJob.id;pollErrors=0;activeJobPhase=phase;activeJobUnit=j.activeJob.unitId||'';pollJob()}updateUrl(phase,true);log('当前进度：阶段 '+phase+' · '+j.state,phase)}catch(e){$('#state').textContent=e.message}}
 let activeJob='',activeJobPhase=0,activeJobUnit='',pollErrors=0;
+const AGENT_EFFORTS=__AGENT_EFFORTS__;const ENGINE_LABELS={codex:'codex',claude:'Claude Code'};
+function fillEfforts(role){const engine=$('#agent'+role+'Engine').value,select=$('#agent'+role+'Effort'),keep=select.value;select.replaceChildren(new Option('推理强度：默认',''));for(const level of AGENT_EFFORTS[engine]||[])select.add(new Option(level,level));select.value=(AGENT_EFFORTS[engine]||[]).includes(keep)?keep:''}
+function agentSettings(){const pick=role=>({engine:$('#agent'+role+'Engine').value,model:$('#agent'+role+'Model').value.trim(),reasoningEffort:$('#agent'+role+'Effort').value});return {generation:pick('Generation'),review:pick('Review')}}
+function agentSummary(agents){const part=(label,s)=>label+'：'+esc(ENGINE_LABELS[s?.engine||'codex'])+' · '+esc(s?.model||'默认模型')+' · '+esc(s?.reasoningEffort||'默认强度');return part('生成',agents?.generation)+'；'+part('审查',agents?.review)}
 const UNIT_LABELS={'page-map':'页面地图','layout':'布局','reuse-analysis':'复用分析','component':'组件','page':'页面','platform-adaptation':'平台适配'};const UNIT_STATUS={'not-started':'未开始','in-progress':'生成中','in-review':'待审查','approved':'已通过','changes-requested':'需要修改'};
 function renderUnits(overview){const box=$('#unitPanel');const units=overview.units;if(!box||!units.length)return;const blocker=overview.phaseBlocker;box.innerHTML='<h4>UI 工作单元</h4><p class="muted">按依赖顺序逐个生成；每个 unit 生成后由独立的只读审查进程给出结论，通过后才解锁下游。</p>'+(blocker?'<p class="muted">'+esc(blocker)+'</p>':'')+units.map(u=>{const review=u.review?'<p>审查（'+esc(u.review.reviewer||'subagent')+'）：'+esc(UNIT_STATUS[u.review.conclusion]||u.review.conclusion)+(u.review.current?'':' · 输出已变化，结论不再适用')+(u.review.summary?' · '+esc(u.review.summary):'')+'</p>':'';const waiting=u.blockedBy.length?' · 等待：'+u.blockedBy.map(d=>esc(UNIT_LABELS[d]||d)).join('、'):'';const preview=u.outputExists?'<a class="review-link" target="_blank" rel="noopener" href="/preview?path='+encodeURIComponent(current)+'&file='+encodeURIComponent(u.output)+'">查看输出</a>':'';const generate='<button data-unit="'+esc(u.id)+'" data-action="generate"'+(u.canGenerate?'':' disabled')+'>'+(u.status==='not-started'?'生成并审查':'重新生成并审查')+'</button>';const again=u.status==='in-review'?'<button class="secondary" data-unit="'+esc(u.id)+'" data-action="review"'+(u.canReview?'':' disabled')+'>只重新审查</button>':'';return '<div class="unit-row"><h5>'+esc(UNIT_LABELS[u.id]||u.id)+' · '+esc(UNIT_STATUS[u.status]||u.status)+'</h5><p class="muted">依赖：'+(u.dependsOn.length?u.dependsOn.map(d=>esc(UNIT_LABELS[d]||d)).join('、'):'无')+waiting+'</p>'+(u.note?'<p class="error">'+esc(u.note)+'</p>':'')+review+'<div class="unit-actions">'+generate+again+preview+'</div></div>'}).join('');box.onclick=e=>{const b=e.target.closest('button[data-unit]');if(b&&!b.disabled)runUnit(b.dataset.unit,b.dataset.action)}}
 async function runUnit(unitId,action){if(!current||activeJob)return;document.querySelectorAll('#unitPanel button').forEach(b=>b.disabled=true);try{const j=await get(action==='review'?'/api/review':'/api/generate',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({path:current,phase:activePhase,unitId})});activeJob=j.job;pollErrors=0;activeJobPhase=activePhase;activeJobUnit=unitId;log((action==='review'?'开始重新审查 unit ':'开始生成 unit ')+unitId+'。',activePhase);pollJob()}catch(e){log('unit '+unitId+' 无法开始：'+e.message,activePhase);loadState()}}
@@ -69,10 +76,15 @@ async function progressAction(){const button=$('#progressButton');if(activeJob&&
 async function checkWorkspace(){if(!current)return;const output=$('#phaseCheck-'+activePhase);try{log('正在检查当前 Phase 并准备推进…',activePhase);const j=await get('/api/check?path='+encodeURIComponent(current));if(!j.ok){output.className='error';output.textContent=j.output.trim()+'\n\n下一步：'+phaseInstruction(activePhase);log('当前 Phase 未通过：'+phaseInstruction(activePhase),activePhase);return}if(activePhase===5){output.className='success';output.textContent=j.output.trim()+'\n\nPhase 5 检查通过，发布交付物已完成。';log('Phase 5 检查通过，全部阶段已完成。',activePhase);return}await advancePhase()}catch(e){output.className='error';output.textContent=e.message;log('检查失败：'+e.message,activePhase)}}
 async function advancePhase(){const s=await get('/api/state?path='+encodeURIComponent(current));await get('/api/advance',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({path:current,fromPhase:Number(s.phase)})});log('已进入 Phase '+(Number(s.phase)+1)+'。',activePhase);await loadState()}
 function esc(s){return String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
-$('#chooseOutputButton').addEventListener('click',()=>openChooser('output'));$('#chooseSourceButton').addEventListener('click',()=>openChooser('source'));$('#cancelChooser').addEventListener('click',()=>dialog.close());$('#confirmChooser').addEventListener('click',confirmChooser);$('#initButton').addEventListener('click',initWorkspace);$('#phases').addEventListener('click',event=>{if(event.target.id==='generateButton')generatePhase();if(event.target.id==='progressButton')progressAction();if(event.target.id==='approveProgressButton')approveProgress();if(event.target.id==='approveG2Button')approveG2();if(event.target.id==='approveHistoryButton')approveHistory();if(event.target.id==='approveHistoryG2Button')approveHistoryG2();if(event.target.id==='approveG3Button')approveGate('G3');if(event.target.id==='approveG4Button')approveGate('G4');if(event.target.id==='approveHistoryG3Button')approveHistoryGate('G3');if(event.target.id==='approveHistoryG4Button')approveHistoryGate('G4')});window.addEventListener('popstate',()=>{const p=new URL(location.href).searchParams.get('workspace');current=p||'';if(current)loadState()});scan();const initial=new URL(location.href).searchParams.get('workspace');if(initial){current=initial;loadState()}
+for(const role of ['Generation','Review']){fillEfforts(role);$('#agent'+role+'Engine').addEventListener('change',()=>fillEfforts(role))}$('#chooseOutputButton').addEventListener('click',()=>openChooser('output'));$('#chooseSourceButton').addEventListener('click',()=>openChooser('source'));$('#cancelChooser').addEventListener('click',()=>dialog.close());$('#confirmChooser').addEventListener('click',confirmChooser);$('#initButton').addEventListener('click',initWorkspace);$('#phases').addEventListener('click',event=>{if(event.target.id==='generateButton')generatePhase();if(event.target.id==='progressButton')progressAction();if(event.target.id==='approveProgressButton')approveProgress();if(event.target.id==='approveG2Button')approveG2();if(event.target.id==='approveHistoryButton')approveHistory();if(event.target.id==='approveHistoryG2Button')approveHistoryG2();if(event.target.id==='approveG3Button')approveGate('G3');if(event.target.id==='approveG4Button')approveGate('G4');if(event.target.id==='approveHistoryG3Button')approveHistoryGate('G3');if(event.target.id==='approveHistoryG4Button')approveHistoryGate('G4')});window.addEventListener('popstate',()=>{const p=new URL(location.href).searchParams.get('workspace');current=p||'';if(current)loadState()});scan();const initial=new URL(location.href).searchParams.get('workspace');if(initial){current=initial;loadState()}
 </script></body></html>'''
 
 
+
+
+def page_html():
+    # The effort choices come from the checker's table, so the page offers exactly what validation accepts.
+    return HTML.replace("__AGENT_EFFORTS__", json.dumps({engine: list(levels) for engine, levels in check_workspace.AGENT_EFFORTS.items()}))
 
 
 def is_workspace(path):
@@ -117,7 +129,6 @@ UI_UNIT_DEPENDENCIES = {
     "platform-adaptation": ("page",),
 }
 UI_UNIT_PHASE = 4
-UNIT_REVIEWER = {"type": "subagent", "name": "codex-unit-reviewer"}
 # ponytail: one lock for every state read-modify-write, shared by all workspaces and held across the advance
 # checker run; it only guards writers inside this workbench process. Per-workspace locks if contention shows up.
 STATE_LOCK = threading.RLock()
@@ -270,7 +281,7 @@ def begin_unit_generation(workspace, unit_id):
         set_unit_status(workspace, unit_id, "in-progress")
 
 
-def mark_unit_in_review(workspace, unit_id):
+def mark_unit_in_review(workspace, unit_id, generated_by=None):
     workspace = Path(workspace).expanduser().resolve()
     with STATE_LOCK:
         manifest = _read_json(workspace / "src/ui/ir/manifest.json")
@@ -290,6 +301,8 @@ def mark_unit_in_review(workspace, unit_id):
             "manifestHash": manifest["hash"],
             "outputHash": check_workspace.unit_output_hash(workspace, unit),
         }
+        if generated_by:
+            metadata["generatedBy"] = generated_by
         _write_json(workspace / unit_dir(unit_id) / "metadata.json", metadata)
         return metadata
 
@@ -404,8 +417,28 @@ def unit_overview(workspace):
     return {"units": overview, "currentUnit": current, "phaseBlocker": phase_blocker}
 
 
-def init_workspace(path, official, one_liner, source_path=None, capabilities=None, stack_profile="html-css-js", platforms=None):
+def _normalize_agents(agents):
+    """Drop empty fields and settings equal to the default (codex, its own model and effort), then validate."""
+    if not agents:
+        return {}
+    if not isinstance(agents, dict):
+        raise ValueError("AI 设置必须是对象")
+    cleaned = {}
+    for role, setting in agents.items():
+        if role in check_workspace.AGENT_ROLES and isinstance(setting, dict):
+            setting = {key: value for key, value in setting.items() if value not in (None, "")}
+            if not setting or setting == {"engine": "codex"}:
+                continue
+        cleaned[role] = setting
+    problems = check_workspace.agent_settings_problems(cleaned)
+    if problems:
+        raise ValueError("AI 设置无效：" + "；".join(problems))
+    return cleaned
+
+
+def init_workspace(path, official, one_liner, source_path=None, capabilities=None, stack_profile="html-css-js", platforms=None, agents=None):
     path = Path(path).expanduser().resolve()
+    agents = _normalize_agents(agents)
     source = None
     if source_path:
         source = Path(source_path).expanduser().resolve()
@@ -464,7 +497,10 @@ def init_workspace(path, official, one_liner, source_path=None, capabilities=Non
         approvals_path.write_text("[]\n", encoding="utf-8")
     ui_path = path / "config/ui.json"
     if not ui_path.exists():
-        _write_json(ui_path, {"version": "1.0.0", "platforms": list(selected_platforms), "stackProfile": stack_profile, "tokenSource": "tokens/src", "deliveryStatus": "preview-only"})
+        ui = {"version": "1.0.0", "platforms": list(selected_platforms), "stackProfile": stack_profile, "tokenSource": "tokens/src", "deliveryStatus": "preview-only"}
+        if agents:
+            ui["agents"] = agents
+        _write_json(ui_path, ui)
     manifest_path = path / "src/ui/ir/manifest.json"
     if not manifest_path.exists():
         _write_json(manifest_path, _manifest_payload(stack_profile, selected_platforms))
@@ -487,13 +523,18 @@ def _phase_requirements(phase):
     return []
 
 
-def _run_codex(cmd, cwd, timeout):
-    """Run one `codex exec` to completion and return its exit code."""
-    # Own process group, so a timeout also stops the commands codex started before files are compared.
-    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, cwd=str(cwd), start_new_session=True)
+def _run_agent(cmd, cwd, timeout, output_path=None):
+    """Run one agent CLI (codex or Claude Code) to completion and return its exit code.
+
+    With output_path, everything it printed is saved there for the caller to parse.
+    """
+    # Own process group, so a timeout also stops the commands the agent started before files are compared.
+    # stdin is closed: Claude Code otherwise waits for piped input before starting.
+    proc = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, cwd=str(cwd), start_new_session=True)
     selector = selectors.DefaultSelector()
     selector.register(proc.stdout, selectors.EVENT_READ)
     deadline = time.time() + timeout
+    lines = []
     try:
         while True:
             if time.time() > deadline:
@@ -502,15 +543,35 @@ def _run_codex(cmd, cwd, timeout):
                 except ProcessLookupError:
                     pass
                 proc.wait()
-                raise TimeoutError("codex 进程超过 %d 分钟未完成，已停止" % (timeout // 60))
+                raise TimeoutError("%s 进程超过 %d 分钟未完成，已停止" % (cmd[0], timeout // 60))
             if selector.select(timeout=1):
-                if not proc.stdout.readline():
+                line = proc.stdout.readline()
+                if not line:
                     break
+                if output_path:
+                    lines.append(line)
             elif proc.poll() is not None:
                 break
     finally:
         selector.close()
+        if output_path:
+            Path(output_path).write_text("".join(lines), encoding="utf-8")
     return proc.wait()
+
+
+def _claude_result(output_path):
+    """The JSON result Claude Code printed; it can exit 0 and still report is_error (e.g. not logged in)."""
+    text = Path(output_path).read_text(encoding="utf-8") if Path(output_path).is_file() else ""
+    for line in reversed(text.splitlines()):
+        try:
+            data = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(data, dict):
+            if data.get("is_error"):
+                raise RuntimeError("Claude Code 报错：%s" % (data.get("result") or data.get("subtype") or "未知错误"))
+            return data
+    raise RuntimeError("Claude Code 没有给出可读的结果：%s" % (text.strip()[-300:] or "无输出"))
 
 
 def _active_job(path):
@@ -693,7 +754,7 @@ def start_generation(path, phase):
             _job_log(job_id, "正在生成 Phase %d 交付物…" % phase, "生成 Phase %d" % phase)
             run_error, code = None, None
             try:
-                code = _run_codex(cmd, path, 600)
+                code = _run_agent(cmd, path, 600)
             except Exception as exc:
                 run_error = exc
             # Approvals, the UI manifest, unit outputs and unit progress belong to other flows.
@@ -818,20 +879,106 @@ def _restore_unit_progress(path, status_bytes):
     return ["project/status.json 的 units"] if tampered else []
 
 
+CODEX_CONFIG = Path.home() / ".codex/config.toml"
+VERDICT_SCHEMA = ROOT / "assets/unit-review-verdict.schema.json"
+
+
+def _codex_config_value(key):
+    """A top-level string setting from codex's own config (before any [table]), or None."""
+    try:
+        text = CODEX_CONFIG.read_text(encoding="utf-8")
+    except OSError:
+        return None
+    for line in text.splitlines():
+        if line.lstrip().startswith("["):
+            break
+        match = re.match(r'\s*%s\s*=\s*"([^"]*)"' % re.escape(key), line)
+        if match:
+            return match.group(1)
+    return None
+
+
+def _agent_setting(path, role):
+    """Engine, model and reasoning effort for unit generation or review; codex with its own defaults if unset."""
+    agents = _read_json(path / "config/ui.json", {}).get("agents") or {}
+    problems = check_workspace.agent_settings_problems(agents)
+    if problems:
+        raise ValueError("config/ui.json 的 AI 设置无效：" + "；".join(problems))
+    setting = dict(agents.get(role) or {})
+    setting.setdefault("engine", "codex")
+    return setting
+
+
+def _agent_command(path, setting, prompt, unit_id=None, verdict_path=None):
+    """Command line for one agent run. Without verdict_path it generates unit_id; with it, it reviews read-only."""
+    review = verdict_path is not None
+    model, effort = setting.get("model"), setting.get("reasoningEffort")
+    if setting["engine"] == "codex":
+        cmd = ["codex", "exec", "--ephemeral", "--skip-git-repo-check", "-s", "read-only" if review else "workspace-write", "-C", str(path)]
+        cmd += ["-m", model] if model else []
+        cmd += ["-c", 'model_reasoning_effort="%s"' % effort] if effort else []
+        cmd += ["--output-schema", str(VERDICT_SCHEMA), "-o", str(verdict_path)] if review else ["--json"]
+        return cmd + [prompt]
+    # Claude Code has no OS sandbox: dontAsk denies every tool not listed, and only the unit's own directory is writable.
+    tools = ["Read", "Glob", "Grep"]
+    if not review:
+        own = path / unit_dir(unit_id)
+        tools += ["Write(/%s/**)" % own, "Edit(/%s/**)" % own]
+    cmd = ["claude", "-p", "--output-format", "json", "--permission-mode", "dontAsk", "--allowedTools"] + tools
+    if review:
+        schema = _read_json(VERDICT_SCHEMA)
+        schema.pop("$schema", None)  # Claude Code's validator rejects the draft 2020-12 meta-schema reference
+        cmd += ["--json-schema", json.dumps(schema, ensure_ascii=False)]
+    cmd += ["--model", model] if model else []
+    cmd += ["--effort", effort] if effort else []
+    return cmd + ["--", prompt]
+
+
+def _run_agent_command(cmd, path, setting):
+    """Run cmd; for Claude Code also return its parsed result, which decides success."""
+    if setting["engine"] != "claude":
+        return _run_agent(cmd, path, 600), None
+    handle, output_path = tempfile.mkstemp(prefix="brand-system-claude-", suffix=".json")
+    os.close(handle)
+    try:
+        code = _run_agent(cmd, path, 600, output_path=output_path)
+        return code, _claude_result(output_path) if code == 0 else None
+    finally:
+        os.unlink(output_path)
+
+
+def _agent_identity(setting, claude_data=None):
+    """Engine, model and effort actually used: Claude Code reports its model; codex falls back to its config."""
+    engine = setting["engine"]
+    if engine == "claude":
+        used = list((claude_data or {}).get("modelUsage") or {})
+        model, effort = (used[0] if used else setting.get("model")), setting.get("reasoningEffort")
+    else:
+        model = setting.get("model") or _codex_config_value("model")
+        effort = setting.get("reasoningEffort") or _codex_config_value("model_reasoning_effort")
+    identity = {"engine": engine, "model": model, "reasoningEffort": effort}
+    return {key: value for key, value in identity.items() if value}
+
+
 def _review_unit(job_id, path, unit_id):
     unit = _unit_record(_read_json(path / "src/ui/ir/manifest.json"), unit_id)
+    setting = _agent_setting(path, "review")
     digest = check_workspace.unit_output_hash(path, unit)
     verdict_path = path / unit_dir(unit_id) / "review.json"
     if verdict_path.exists():
         verdict_path.unlink()
-    _job_log(job_id, "正在启动独立审查进程（只读）…", "审查 unit %s" % unit_id)
-    cmd = [
-        "codex", "exec", "--ephemeral", "--skip-git-repo-check", "-s", "read-only", "-C", str(path),
-        "--output-schema", str(ROOT / "assets/unit-review-verdict.schema.json"), "-o", str(verdict_path), _review_prompt(unit),
-    ]
-    code = _run_codex(cmd, path, 600)
+    _job_log(job_id, "正在启动独立审查进程（%s，只读）…" % setting["engine"], "审查 unit %s" % unit_id)
+    code, claude_data = _run_agent_command(_agent_command(path, setting, _review_prompt(unit), verdict_path=verdict_path), path, setting)
     if code != 0:
         raise RuntimeError("审查进程退出码 %d" % code)
+    if claude_data is not None:
+        verdict = claude_data.get("structured_output")
+        if not isinstance(verdict, dict):
+            try:
+                verdict = json.loads(claude_data.get("result") or "")
+            except ValueError:
+                raise ValueError("审查进程没有给出可读的结论")
+        _write_json(verdict_path, verdict)
     try:
         verdict = json.loads(verdict_path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
@@ -855,7 +1002,8 @@ def _review_unit(job_id, path, unit_id):
             {"path": rel, "startLine": 1, "endLine": max(1, len((path / rel).read_text(encoding="utf-8").splitlines()))}
             for rel in unit["files"]
         ]
-        record = append_unit_review(path, unit_id, verdict["conclusion"], UNIT_REVIEWER, evidence, scope, digest, verdict["summary"])
+        reviewer = dict({"type": "subagent", "name": "%s-unit-reviewer" % setting["engine"]}, **_agent_identity(setting, claude_data))
+        record = append_unit_review(path, unit_id, verdict["conclusion"], reviewer, evidence, scope, digest, verdict["summary"])
     _job_log(job_id, "审查结论：%s · %s" % (verdict["conclusion"], verdict["summary"].strip()))
     return record
 
@@ -875,11 +1023,13 @@ def _fail_unit_job(job_id, path, unit_id, exc):
 
 
 def start_unit_job(path, phase, unit_id):
-    """Generate one UI unit, then have an independent read-only codex process review it."""
+    """Generate one UI unit, then have an independent read-only agent process review it."""
     path = Path(path).expanduser().resolve()
     # Preconditions, claim and snapshot share STATE_LOCK: an approval or advance cannot land between them.
     with STATE_LOCK:
         _require_unit_phase(path, phase)
+        setting = _agent_setting(path, "generation")
+        _agent_setting(path, "review")  # an invalid review setting should stop the job before anything runs
         choice = g1_choice(_read_json(path / "project/approvals.json", []))
         unit = _unit_record(_read_json(path / "src/ui/ir/manifest.json"), unit_id)
         prompt = _unit_prompt(path, unit, choice)
@@ -896,13 +1046,13 @@ def start_unit_job(path, phase, unit_id):
             raise
 
     def run():
-        # No --add-dir: extra dirs become writable, and the skill repo must stay out of a unit job's reach.
-        cmd = ["codex", "exec", "--ephemeral", "--skip-git-repo-check", "-s", "workspace-write", "-C", str(path), "--json", prompt]
+        # No --add-dir for either engine: extra dirs become writable, and the skill repo must stay out of reach.
+        cmd = _agent_command(path, setting, prompt, unit_id=unit_id)
         try:
-            _job_log(job_id, "正在生成 unit %s…" % unit_id, "生成 unit %s" % unit_id)
-            run_error, code = None, None
+            _job_log(job_id, "正在生成 unit %s（%s）…" % (unit_id, setting["engine"]), "生成 unit %s" % unit_id)
+            run_error, code, claude_data = None, None, None
             try:
-                code = _run_codex(cmd, path, 600)
+                code, claude_data = _run_agent_command(cmd, path, setting)
             except Exception as exc:
                 run_error = exc
             # Restore before reporting anything: a timeout or crash may already have written outside the unit.
@@ -922,7 +1072,7 @@ def start_unit_job(path, phase, unit_id):
                 raise run_error
             if code != 0:
                 raise RuntimeError("生成进程退出码 %d" % code)
-            mark_unit_in_review(path, unit_id)
+            mark_unit_in_review(path, unit_id, _agent_identity(setting, claude_data))
             _job_log(job_id, "unit %s 已生成，进入审查。" % unit_id)
             _review_unit(job_id, path, unit_id)
             _record_phase_check(job_id, path, phase)
@@ -968,7 +1118,7 @@ class Handler(BaseHTTPRequestHandler):
         parsed = urlparse(self.path)
         try:
             if parsed.path == "/":
-                data = HTML.encode(); self.send_response(200); self.send_header("Content-Type", "text/html; charset=utf-8"); self.send_header("Content-Length", str(len(data))); self.end_headers(); self.wfile.write(data); return
+                data = page_html().encode(); self.send_response(200); self.send_header("Content-Type", "text/html; charset=utf-8"); self.send_header("Content-Length", str(len(data))); self.end_headers(); self.wfile.write(data); return
             from urllib.parse import parse_qs
             q = parse_qs(parsed.query)
             path = Path(q.get("path", [""])[0]).expanduser().resolve()
@@ -1051,7 +1201,7 @@ class Handler(BaseHTTPRequestHandler):
             if not target.is_absolute(): target = self.root / target
             with STATE_LOCK:
                 _refuse_while_running(target.expanduser().resolve())
-                path = init_workspace(target, body.get("official", ""), body.get("oneLiner", ""), body.get("sourcePath") or None, body.get("capabilities") or [], body.get("stackProfile", "html-css-js"), body.get("platforms"))
+                path = init_workspace(target, body.get("official", ""), body.get("oneLiner", ""), body.get("sourcePath") or None, body.get("capabilities") or [], body.get("stackProfile", "html-css-js"), body.get("platforms"), body.get("agents"))
             self.send_json({"path": str(path)})
         except Exception as exc: self.send_json({"error": str(exc)}, 400)
     def log_message(self, *_): pass

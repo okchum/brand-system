@@ -95,7 +95,24 @@
         },
         "stackProfile": { "$ref": "#/$defs/stackProfile" },
         "tokenSource": { "const": "tokens/src" },
-        "deliveryStatus": { "$ref": "#/$defs/deliveryStatus" }
+        "deliveryStatus": { "$ref": "#/$defs/deliveryStatus" },
+        "agents": {
+          "type": "object",
+          "properties": {
+            "generation": { "$ref": "#/$defs/agentSetting" },
+            "review": { "$ref": "#/$defs/agentSetting" }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "agentSetting": {
+      "type": "object",
+      "properties": {
+        "engine": { "enum": ["codex", "claude"] },
+        "model": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/\\[\\]-]*$" },
+        "reasoningEffort": { "enum": ["low", "medium", "high", "xhigh", "max"] }
       },
       "additionalProperties": false
     },
@@ -174,7 +191,10 @@
           "required": ["type", "name"],
           "properties": {
             "type": { "const": "subagent" },
-            "name": { "type": "string", "minLength": 1 }
+            "name": { "type": "string", "minLength": 1 },
+            "engine": { "enum": ["codex", "claude"] },
+            "model": { "type": "string", "minLength": 1 },
+            "reasoningEffort": { "type": "string", "minLength": 1 }
           },
           "additionalProperties": false
         },

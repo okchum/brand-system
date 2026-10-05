@@ -74,8 +74,8 @@ class UiWorkbenchTest(unittest.TestCase):
             output_hash=current_output_hash(workspace, unit_id),
         )
 
-    def phase_four(self, root):
-        workspace = self.init(root)
+    def phase_four(self, root, **init_options):
+        workspace = self.init(root, **init_options)
         status_path = workspace / "project/status.json"
         status = json.loads(status_path.read_text(encoding="utf-8"))
         status["phase"] = 4
@@ -217,7 +217,7 @@ class UiWorkbenchTest(unittest.TestCase):
     def test_phase_one_generation_does_not_require_g1(self):
         with tempfile.TemporaryDirectory() as root:
             workspace = self.at_phase(self.init(root), 1)
-            with mock.patch.object(workbench, "_run_codex", return_value=1):
+            with mock.patch.object(workbench, "_run_agent", return_value=1):
                 job_id = workbench.start_generation(workspace, 1)
                 wait_for(job_id)
             self.assertNotIn("Direction B", workbench.JOBS[job_id]["prompt"])
@@ -228,7 +228,7 @@ class UiWorkbenchTest(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "G1"):
                 workbench.start_generation(workspace, 2)
             (workspace / "project/approvals.json").write_text(json.dumps([G1_APPROVED]), encoding="utf-8")
-            with mock.patch.object(workbench, "_run_codex", return_value=1):
+            with mock.patch.object(workbench, "_run_agent", return_value=1):
                 job_id = workbench.start_generation(workspace, 2)
                 wait_for(job_id)
             self.assertIn("Direction C", workbench.JOBS[job_id]["prompt"])
@@ -317,27 +317,41 @@ class UiWorkbenchTest(unittest.TestCase):
             self.assertIn("page-map", layout["note"])
             self.assertEqual(self.unit_status(workspace, "component")["status"], "not-started")
 
-    def fake_codex(self, generated="<main>generated</main>\n", verdict=None, stray=None):
+    def fake_codex(self, generated="<main>generated</main>\n", verdict=None, stray=None, claude_error=None):
+        """Stand-in for both engines: codex writes the verdict via -o, Claude Code prints a JSON result."""
         calls = []
 
-        def run(cmd, cwd, timeout):
+        def run(cmd, cwd, timeout, output_path=None):
             calls.append(cmd)
-            if "read-only" in cmd:
+            claude = cmd[0] == "claude"
+            if "read-only" in cmd or "--json-schema" in cmd:
                 if verdict is not None:
-                    target = Path(cmd[cmd.index("-o") + 1])
-                    target.write_text(verdict if isinstance(verdict, str) else json.dumps(verdict), encoding="utf-8")
+                    text = verdict if isinstance(verdict, str) else json.dumps(verdict)
+                    if claude:
+                        structured = None if isinstance(verdict, str) else verdict
+                        Path(output_path).write_text(json.dumps({
+                            "is_error": False, "result": text, "structured_output": structured,
+                            "modelUsage": {"claude-sonnet-5-5": {}},
+                        }), encoding="utf-8")
+                    else:
+                        Path(cmd[cmd.index("-o") + 1]).write_text(text, encoding="utf-8")
                 return 0
             unit_id = re.search(r"src/ui/units/([a-z-]+)/output\.html", cmd[-1]).group(1)
             write_output(cwd, unit_id, generated)
             if stray:
                 (Path(cwd) / stray[0]).write_text(stray[1], encoding="utf-8")
+            if claude:
+                Path(output_path).write_text(json.dumps({
+                    "is_error": claude_error is not None, "result": claude_error or "done",
+                    "modelUsage": {"claude-sonnet-5-5": {}},
+                }), encoding="utf-8")
             return 0
         return run, calls
 
     def run_unit_job(self, workspace, unit_id, **fake):
         run, calls = self.fake_codex(**fake)
         failed_check = subprocess.CompletedProcess([], 1, "unit layout requires unit-review", "")
-        with mock.patch.object(workbench, "_run_codex", side_effect=run), \
+        with mock.patch.object(workbench, "_run_agent", side_effect=run), \
                 mock.patch.object(workbench.subprocess, "run", return_value=failed_check):
             job = wait_for(workbench.start_unit_job(workspace, 4, unit_id))
         return job, calls
@@ -355,9 +369,89 @@ class UiWorkbenchTest(unittest.TestCase):
             self.assertIn(str(ROOT / "assets/unit-review-verdict.schema.json"), calls[1])
             self.assertEqual(self.unit_status(workspace, "page-map")["status"], "approved")
             record = self.read(root, "project/approvals.json")[-1]
-            self.assertEqual(record["reviewer"], {"type": "subagent", "name": "codex-unit-reviewer"})
+            self.assertEqual(
+                {key: record["reviewer"][key] for key in ("type", "name", "engine")},
+                {"type": "subagent", "name": "codex-unit-reviewer", "engine": "codex"},
+            )
             self.assertEqual(record["outputHash"], current_output_hash(workspace, "page-map"))
             self.assertIn("Layout tokens used correctly", record["evidence"])
+
+    def test_agent_settings_are_validated_and_stored_at_init(self):
+        with tempfile.TemporaryDirectory() as root:
+            agents = {"generation": {"engine": "codex", "model": "gpt-6.1-sol", "reasoningEffort": "high"},
+                      "review": {"engine": "claude", "reasoningEffort": "max"}}
+            self.init(root, agents=agents)
+            self.assertEqual(self.read(root, "config/ui.json")["agents"], agents)
+        for bad, needle in (
+            ({"generation": {"engine": "gemini"}}, "engine"),
+            ({"review": {"engine": "codex", "reasoningEffort": "max"}}, "reasoningEffort"),
+            ({"review": {"engine": "claude", "model": "--dangerously-skip-permissions"}}, "model"),
+            ({"review": {"engine": "claude", "model": "opus 5"}}, "model"),
+            ({"planning": {"engine": "codex"}}, "planning"),
+        ):
+            with self.subTest(bad=bad), tempfile.TemporaryDirectory() as root:
+                with self.assertRaisesRegex(ValueError, needle):
+                    self.init(root, agents=bad)
+        with tempfile.TemporaryDirectory() as root:
+            self.init(root, agents={"generation": {"engine": "codex", "model": "", "reasoningEffort": ""}})
+            self.assertNotIn("agents", self.read(root, "config/ui.json"))
+
+    def test_claude_generation_and_review_stay_inside_their_permissions(self):
+        with tempfile.TemporaryDirectory() as root:
+            workspace = self.phase_four(root, agents={
+                "generation": {"engine": "claude", "model": "sonnet", "reasoningEffort": "high"},
+                "review": {"engine": "claude", "reasoningEffort": "max"},
+            })
+            verdict = {"conclusion": "approved", "summary": "Claude review ok", "findings": []}
+            job, calls = self.run_unit_job(workspace, "page-map", verdict=verdict)
+            self.assertEqual(job["status"], "done", job["error"])
+            generate, review = calls
+            own = "Write(/%s/**)" % (workspace / workbench.unit_dir("page-map"))
+            self.assertEqual(generate[:2], ["claude", "-p"])
+            self.assertIn("dontAsk", generate)
+            self.assertIn(own, generate)
+            self.assertNotIn("Bash", generate)
+            self.assertEqual(generate[generate.index("--model") + 1], "sonnet")
+            self.assertEqual(generate[generate.index("--effort") + 1], "high")
+            self.assertIn("--json-schema", review)
+            self.assertNotIn("$schema", json.loads(review[review.index("--json-schema") + 1]))
+            self.assertFalse([part for part in review if part.startswith(("Write", "Edit"))])
+            self.assertNotIn("--model", review)
+            self.assertEqual(review[review.index("--effort") + 1], "max")
+            record = self.read(root, "project/approvals.json")[-1]
+            self.assertEqual(record["reviewer"], {
+                "type": "subagent", "name": "claude-unit-reviewer", "engine": "claude",
+                "model": "claude-sonnet-5-5", "reasoningEffort": "max",
+            })
+            self.assertEqual(json.loads((workspace / workbench.unit_dir("page-map") / "review.json").read_text(encoding="utf-8")), verdict)
+            metadata = json.loads((workspace / workbench.unit_dir("page-map") / "metadata.json").read_text(encoding="utf-8"))
+            self.assertEqual(metadata["generatedBy"], {"engine": "claude", "model": "claude-sonnet-5-5", "reasoningEffort": "high"})
+
+    def test_claude_reported_error_fails_the_unit_job(self):
+        with tempfile.TemporaryDirectory() as root:
+            workspace = self.phase_four(root, agents={"generation": {"engine": "claude"}})
+            job, _ = self.run_unit_job(workspace, "page-map", claude_error="Not logged in · Please run /login")
+            self.assertEqual(job["status"], "error")
+            self.assertIn("Not logged in", job["error"])
+            self.assertEqual(self.unit_status(workspace, "page-map")["status"], "in-progress")
+
+    def test_codex_model_and_effort_are_passed_and_recorded(self):
+        with tempfile.TemporaryDirectory() as root:
+            workspace = self.phase_four(root, agents={"generation": {"engine": "codex", "model": "gpt-test", "reasoningEffort": "high"}})
+            config = Path(root) / "codex-config.toml"
+            config.write_text('model = "gpt-default"\nmodel_reasoning_effort = "medium"\n\n[projects."x"]\nmodel = "ignored"\n', encoding="utf-8")
+            verdict = {"conclusion": "approved", "summary": "ok", "findings": []}
+            with mock.patch.object(workbench, "CODEX_CONFIG", config):
+                job, calls = self.run_unit_job(workspace, "page-map", verdict=verdict)
+            self.assertEqual(job["status"], "done", job["error"])
+            generate, review = calls
+            self.assertEqual(generate[generate.index("-m") + 1], "gpt-test")
+            self.assertEqual(generate[generate.index("-c") + 1], 'model_reasoning_effort="high"')
+            self.assertNotIn("-m", review)
+            record = self.read(root, "project/approvals.json")[-1]
+            self.assertEqual(record["reviewer"]["engine"], "codex")
+            self.assertEqual(record["reviewer"]["model"], "gpt-default")
+            self.assertEqual(record["reviewer"]["reasoningEffort"], "medium")
 
     def test_unit_job_with_invalid_verdict_leaves_unit_in_review(self):
         with tempfile.TemporaryDirectory() as root:
@@ -372,7 +466,7 @@ class UiWorkbenchTest(unittest.TestCase):
             verdict = {"conclusion": "changes-requested", "summary": "Navigation misses focus state", "findings": [
                 {"severity": "P1", "location": "output.html nav", "problem": "no focus-visible style"}]}
             run, _ = self.fake_codex(verdict=verdict)
-            with mock.patch.object(workbench, "_run_codex", side_effect=run), \
+            with mock.patch.object(workbench, "_run_agent", side_effect=run), \
                     mock.patch.object(workbench.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, "", "")):
                 job = wait_for(workbench.start_review_job(workspace, 4, "page-map"))
             self.assertEqual(job["status"], "done", job)
@@ -401,7 +495,7 @@ class UiWorkbenchTest(unittest.TestCase):
                 (Path(cwd) / "project/approvals.json").write_text("[]", encoding="utf-8")
                 write_output(cwd, "layout", "<main>written by the wrong job</main>\n")
                 raise TimeoutError("codex 进程超过 10 分钟未完成")
-            with mock.patch.object(workbench, "_run_codex", side_effect=stray_then_timeout):
+            with mock.patch.object(workbench, "_run_agent", side_effect=stray_then_timeout):
                 job = wait_for(workbench.start_unit_job(workspace, 4, "page-map"))
             self.assertEqual(job["status"], "error")
             self.assertIn("超过 10 分钟", job["error"])
@@ -418,7 +512,7 @@ class UiWorkbenchTest(unittest.TestCase):
                 if note:
                     raise OSError("disk full")
                 return real_set(path, unit_id, status, note)
-            with mock.patch.object(workbench, "_run_codex", return_value=1), \
+            with mock.patch.object(workbench, "_run_agent", return_value=1), \
                     mock.patch.object(workbench, "set_unit_status", side_effect=failing_note):
                 job = wait_for(workbench.start_unit_job(workspace, 4, "page-map"))
             self.assertEqual(job["status"], "error")
@@ -442,7 +536,7 @@ class UiWorkbenchTest(unittest.TestCase):
 
             def timeout(cmd, cwd, timeout):
                 raise TimeoutError("codex 进程超过 10 分钟未完成")
-            with mock.patch.object(workbench, "_run_codex", side_effect=timeout), \
+            with mock.patch.object(workbench, "_run_agent", side_effect=timeout), \
                     mock.patch.object(workbench, "_restore_outside_unit", side_effect=PermissionError("approvals.json locked")):
                 job = wait_for(workbench.start_unit_job(workspace, 4, "page-map"))
             self.assertEqual(job["status"], "error")
@@ -462,7 +556,7 @@ class UiWorkbenchTest(unittest.TestCase):
                 (Path(cwd) / "tokens/src/color.json").write_text('{"primary": "#ff0000"}', encoding="utf-8")
                 (Path(cwd) / "brand.brief.json").write_text("{}", encoding="utf-8")
                 return 0
-            with mock.patch.object(workbench, "_run_codex", side_effect=rewrite_shared):
+            with mock.patch.object(workbench, "_run_agent", side_effect=rewrite_shared):
                 job = wait_for(workbench.start_unit_job(workspace, 4, "page-map"))
             self.assertEqual(job["status"], "error")
             self.assertEqual(tokens.read_text(encoding="utf-8"), '{"primary": "#123456"}')
@@ -491,7 +585,7 @@ class UiWorkbenchTest(unittest.TestCase):
                 file_scope=[{"path": workbench.unit_output_path("page-map"), "startLine": 1, "endLine": 1}],
                 output_hash=current_output_hash(workspace, "page-map"),
             )
-            with mock.patch.object(workbench, "_run_codex", return_value=1):
+            with mock.patch.object(workbench, "_run_agent", return_value=1):
                 job = wait_for(workbench.start_unit_job(workspace, 4, "page-map"))
             self.assertIn("no focus-visible style", job["prompt"])
             self.assertIn("Navigation misses focus state", job["prompt"])
@@ -514,7 +608,7 @@ class UiWorkbenchTest(unittest.TestCase):
                 (Path(cwd) / "review/04-assets.html").parent.mkdir(parents=True, exist_ok=True)
                 (Path(cwd) / "review/04-assets.html").write_text("<main>assets</main>", encoding="utf-8")
                 return 0
-            with mock.patch.object(workbench, "_run_codex", side_effect=phase_job), \
+            with mock.patch.object(workbench, "_run_agent", side_effect=phase_job), \
                     mock.patch.object(workbench.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, "", "")):
                 job = wait_for(workbench.start_generation(workspace, 4))
             self.assertEqual(job["status"], "error")
@@ -542,7 +636,7 @@ class UiWorkbenchTest(unittest.TestCase):
             def slow(cmd, cwd, timeout):
                 release.wait(5)
                 return 1
-            with mock.patch.object(workbench, "_run_codex", side_effect=slow):
+            with mock.patch.object(workbench, "_run_agent", side_effect=slow):
                 job_id = workbench.start_unit_job(workspace, 4, "page-map")
                 with self.assertRaisesRegex(ValueError, "任务"):
                     workbench.start_generation(workspace, 4)
@@ -559,7 +653,7 @@ class UiWorkbenchTest(unittest.TestCase):
                     "phase": 4, "state": "in-review", "completed": [], "next": [], "blockers": [],
                 }), encoding="utf-8")
                 return 0
-            with mock.patch.object(workbench, "_run_codex", side_effect=documented_shape), \
+            with mock.patch.object(workbench, "_run_agent", side_effect=documented_shape), \
                     mock.patch.object(workbench.subprocess, "run", return_value=subprocess.CompletedProcess([], 1, "units pending", "")):
                 job = wait_for(workbench.start_generation(workspace, 4))
             self.assertEqual(job["status"], "done", job["error"])
@@ -590,7 +684,7 @@ class UiWorkbenchTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as root:
             workspace = self.at_phase(self.init(root), 1)
             failed = subprocess.CompletedProcess([], 1, "missing review/01-directions.html", "")
-            with mock.patch.object(workbench, "_run_codex", return_value=0), \
+            with mock.patch.object(workbench, "_run_agent", return_value=0), \
                     mock.patch.object(workbench.subprocess, "run", return_value=failed):
                 job = wait_for(workbench.start_generation(workspace, 1))
             self.assertEqual(job["status"], "done")
@@ -693,6 +787,15 @@ class UiWorkbenchHttpTest(unittest.TestCase):
         code, payload = self.call("/api/advance", {"path": str(self.workspace), "fromPhase": 1})
         self.assertEqual(code, 400)
         self.assertIn("G1", payload["error"])
+
+    def test_init_endpoint_stores_agent_settings(self):
+        agents = {"review": {"engine": "claude", "model": "opus", "reasoningEffort": "xhigh"}}
+        code, payload = self.call("/api/init", {
+            "path": str(self.root / "second"), "official": "Second", "oneLiner": "x", "agents": agents,
+        })
+        self.assertEqual(code, 200, payload)
+        ui = json.loads((self.root / "second/config/ui.json").read_text(encoding="utf-8"))
+        self.assertEqual(ui["agents"], agents)
 
     def test_state_exposes_unit_overview(self):
         code, payload = self.call("/api/state?path=" + str(self.workspace))

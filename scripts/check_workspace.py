@@ -38,6 +38,10 @@ UNIT_KINDS = ("page-map", "layout", "reuse-analysis", "component", "page", "plat
 UNIT_STATUSES = ("not-started", "in-progress", "in-review", "approved", "changes-requested")
 REVIEW_CONCLUSIONS = ("approved", "changes-requested")
 SHA256_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
+AGENT_ROLES = ("generation", "review")
+# Reasoning effort values each engine's CLI accepts (codex: model_reasoning_effort; Claude Code: --effort).
+AGENT_EFFORTS = {"codex": ("low", "medium", "high"), "claude": ("low", "medium", "high", "xhigh", "max")}
+AGENT_MODEL_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/\[\]-]*$")
 ROOT = Path(__file__).resolve().parents[1]
 
 
@@ -172,6 +176,34 @@ def check_adapter(adapter, problems):
         check_token_values(details, "config/ui.json.adapter.%s" % platform, problems)
 
 
+def agent_settings_problems(agents):
+    """Problems with config/ui.json "agents": which engine, model and reasoning effort run unit generation and review."""
+    if not isinstance(agents, dict):
+        return ["agents must be an object"]
+    problems = []
+    for role, setting in agents.items():
+        label = "agents.%s" % role
+        if role not in AGENT_ROLES:
+            problems.append("%s is not a known role (use %s)" % (label, " or ".join(AGENT_ROLES)))
+            continue
+        if not isinstance(setting, dict):
+            problems.append("%s must be an object" % label)
+            continue
+        for key in sorted(set(setting) - {"engine", "model", "reasoningEffort"}):
+            problems.append("%s.%s is not a known field" % (label, key))
+        engine = setting.get("engine", "codex")
+        if engine not in AGENT_EFFORTS:
+            problems.append("%s.engine must be one of %s" % (label, list(AGENT_EFFORTS)))
+            continue
+        model = setting.get("model")
+        if model is not None and (not isinstance(model, str) or not AGENT_MODEL_RE.match(model)):
+            problems.append("%s.model must be a model name without spaces that does not start with -" % label)
+        effort = setting.get("reasoningEffort")
+        if effort is not None and effort not in AGENT_EFFORTS[engine]:
+            problems.append("%s.reasoningEffort must be one of %s for %s" % (label, list(AGENT_EFFORTS[engine]), engine))
+    return problems
+
+
 def check_ui_config(ui, brief, problems):
     if not isinstance(ui, dict):
         problems.append("config/ui.json: must be an object")
@@ -191,6 +223,8 @@ def check_ui_config(ui, brief, problems):
     if ui.get("deliveryStatus") == "handoff-ready" and (not isinstance(evidence, list) or not evidence):
         problems.append("config/ui.json: handoff-ready requires evidence")
     check_adapter(ui.get("adapter"), problems)
+    if "agents" in ui:
+        problems.extend("config/ui.json: " + problem for problem in agent_settings_problems(ui["agents"]))
     check_claim_statuses(ui, "config/ui.json", problems)
     check_token_values(ui, "config/ui.json", problems)
     constraints = brief.get("constraints") if isinstance(brief, dict) else None

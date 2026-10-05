@@ -195,6 +195,12 @@ class UiCheckerTest(unittest.TestCase):
         self.assert_finding(findings, "outputHash is invalid")
         self.assert_finding(findings, "reviewer must be a named subagent")
 
+    def test_ui_config_agent_settings_are_checked(self):
+        ui = dict(self.valid_ui(), agents={"review": {"engine": "claude", "reasoningEffort": "max"}})
+        self.assertNotIn("agents", " ".join(self.findings(ui=ui)))
+        ui["agents"] = {"generation": {"engine": "codex", "reasoningEffort": "max"}}
+        self.assert_finding(self.findings(ui=ui), "config/ui.json: agents.generation.reasoningEffort")
+
     def test_manifest_must_cover_every_unit_kind_and_completed_is_gone(self):
         findings = self.findings()
         self.assert_finding(findings, "manifest is missing unit kind reuse-analysis")
