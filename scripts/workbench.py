@@ -661,14 +661,18 @@ def _phase_prompt(phase, choice):
         if choice
         else "Phase 1 先生成三套方向并准备后续 G1 选择，不要假设已有方向审批。"
     )
-    return f"""在当前品牌工作区完成 Phase {phase} 交付。只写入当前工作区目录，不修改技能仓库或其他目录。读取 brand.brief.json、review/、docs/、project/ 和 config/ 中现有资料；如有 source.json，读取其中列出的参考资料。创建并验证本阶段必需文件：{deliverables}。保持方向选择、审批和暂定假设可追溯，不把未确认内容写成最终事实。确保每张方向卡片的 hero 标题、描述和图标有独立空间，文字与图标不能重叠，并检查浅色与深色背景下的对比度。每套方向必须包含一个较大的产品界面配色 demo，展示背景、文字、按钮、状态、层级和真实场景，不要只放色板。{direction_instruction}同步更新 project/status.json 为 phase {phase}、state in-review，并保存 reports/phase-{phase}-check.txt。不要只解释，直接创建文件。"""
+    return f"""在当前品牌工作区完成 Phase {phase} 交付。只写入当前工作区目录，不修改技能仓库或其他目录。读取 brand.brief.json、review/、docs/、project/ 和 config/ 中现有资料；如有 source.json，读取其中列出的参考资料。创建并验证本阶段必需文件：{deliverables}。保持方向选择、审批和暂定假设可追溯，不把未确认内容写成最终事实。确保每张方向卡片的 hero 标题、描述和图标有独立空间，文字与图标不能重叠，并检查浅色与深色背景下的对比度。每套方向必须包含一个较大的产品界面配色 demo，展示背景、文字、按钮、状态、层级和真实场景，不要只放色板。{direction_instruction}同步更新 project/status.json 为 phase {phase}、state in-review（其中的 units 字段原样保留，不要改动），并保存 reports/phase-{phase}-check.txt。不要只解释，直接创建文件。"""
 
 
 def start_generation(path, phase):
     path = Path(path).expanduser().resolve()
-    choice = g1_choice(_read_json(path / "project/approvals.json", [])) if phase >= 2 else None
-    prompt = _phase_prompt(phase, choice)
+    # Preconditions and the claim share the lock, so an advance or a withdrawn gate cannot slip between them.
     with STATE_LOCK:
+        if int(_read_json(path / "project/status.json").get("phase", -1)) != phase or phase not in (1, 2, 3, 4, 5):
+            raise ValueError("只能为当前阶段生成交付物")
+        _require_gates(path, phase)
+        choice = g1_choice(_read_json(path / "project/approvals.json", [])) if phase >= 2 else None
+        prompt = _phase_prompt(phase, choice)
         job_id = _create_job(path, prompt)
         try:
             before = _snapshot(path, PHASE_PROTECTED_ROOTS)
@@ -783,9 +787,15 @@ def _restore_outside_unit(path, unit_id, before):
 
 
 def _restore_unit_progress(path, status_bytes):
-    """Put status.json's units back as they were; the phase job may still update phase and state."""
+    """Put status.json's units back as they were; the phase job may still update phase and state.
+
+    A rewrite that merely leaves units out follows the documented status shape and is repaired quietly;
+    only units that are present and different count as tampering.
+    """
     status_path = path / "project/status.json"
     before = json.loads(status_bytes)
+    if not isinstance(before, dict) or "units" not in before:
+        return []
     try:
         current = json.loads(status_path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
@@ -794,11 +804,12 @@ def _restore_unit_progress(path, status_bytes):
     if not isinstance(current, dict):
         status_path.write_bytes(status_bytes)
         return ["project/status.json"]
-    if current.get("units") == before.get("units"):
+    if current.get("units") == before["units"]:
         return []
-    current["units"] = before.get("units", [])
+    tampered = "units" in current
+    current["units"] = before["units"]
     _write_json(status_path, current)
-    return ["project/status.json 的 units"]
+    return ["project/status.json 的 units"] if tampered else []
 
 
 def _review_unit(job_id, path, unit_id):
@@ -860,12 +871,12 @@ def _fail_unit_job(job_id, path, unit_id, exc):
 def start_unit_job(path, phase, unit_id):
     """Generate one UI unit, then have an independent read-only codex process review it."""
     path = Path(path).expanduser().resolve()
-    _require_unit_phase(path, phase)
-    choice = g1_choice(_read_json(path / "project/approvals.json", []))
-    unit = _unit_record(_read_json(path / "src/ui/ir/manifest.json"), unit_id)
-    prompt = _unit_prompt(path, unit, choice)
-    # Claim and snapshot under STATE_LOCK: an approval or advance holding the lock cannot land between them.
+    # Preconditions, claim and snapshot share STATE_LOCK: an approval or advance cannot land between them.
     with STATE_LOCK:
+        _require_unit_phase(path, phase)
+        choice = g1_choice(_read_json(path / "project/approvals.json", []))
+        unit = _unit_record(_read_json(path / "src/ui/ir/manifest.json"), unit_id)
+        prompt = _unit_prompt(path, unit, choice)
         job_id = _create_job(path, prompt, unit_id)
         try:
             # Snapshot first: if it fails nothing has changed yet. begin_unit_generation then rewrites
@@ -1018,14 +1029,10 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_json({"ok": True, "gate": body.get("gate")})
             if endpoint == "/api/generate":
                 path = self.workspace_path(body.get("path", ""))
-                status = _read_json(path / "project/status.json")
                 unit_id = body.get("unitId")
                 phase = int(body.get("phase", 1))
                 if unit_id:
                     return self.send_json({"job": start_unit_job(path, phase, unit_id), "unitId": unit_id})
-                if int(status.get("phase", -1)) != phase or phase not in (1, 2, 3, 4, 5):
-                    raise ValueError("只能为当前阶段生成交付物")
-                _require_gates(path, phase)
                 return self.send_json({"job": start_generation(path, phase)})
             if endpoint == "/api/review":
                 path = self.workspace_path(body.get("path", ""))

@@ -200,9 +200,23 @@ class UiWorkbenchTest(unittest.TestCase):
         later_gate = dict(G1_APPROVED, gate="G2")
         self.assertEqual(workbench.g1_choice([G1_APPROVED, later_gate]), "C")
 
-    def test_phase_one_generation_does_not_require_g1(self):
+    def at_phase(self, workspace, phase):
+        status_path = Path(workspace) / "project/status.json"
+        status = json.loads(status_path.read_text(encoding="utf-8"))
+        status["phase"] = phase
+        status_path.write_text(json.dumps(status), encoding="utf-8")
+        return workspace
+
+    def test_phase_generation_only_runs_for_the_current_phase(self):
         with tempfile.TemporaryDirectory() as root:
             workspace = self.init(root)
+            with self.assertRaisesRegex(ValueError, "只能为当前阶段"):
+                workbench.start_generation(workspace, 2)
+            self.assertIsNone(workbench._running_job(workspace))
+
+    def test_phase_one_generation_does_not_require_g1(self):
+        with tempfile.TemporaryDirectory() as root:
+            workspace = self.at_phase(self.init(root), 1)
             with mock.patch.object(workbench, "_run_codex", return_value=1):
                 job_id = workbench.start_generation(workspace, 1)
                 wait_for(job_id)
@@ -210,7 +224,7 @@ class UiWorkbenchTest(unittest.TestCase):
 
     def test_later_generation_requires_latest_valid_g1_and_uses_its_direction(self):
         with tempfile.TemporaryDirectory() as root:
-            workspace = self.init(root)
+            workspace = self.at_phase(self.init(root), 2)
             with self.assertRaisesRegex(ValueError, "G1"):
                 workbench.start_generation(workspace, 2)
             (workspace / "project/approvals.json").write_text(json.dumps([G1_APPROVED]), encoding="utf-8")
@@ -535,9 +549,26 @@ class UiWorkbenchTest(unittest.TestCase):
                 release.set()
                 wait_for(job_id)
 
+    def test_phase_job_that_rewrites_status_without_units_keeps_unit_progress(self):
+        with tempfile.TemporaryDirectory() as root:
+            workspace = self.phase_four(root)
+            self.review(workspace, "page-map")
+
+            def documented_shape(cmd, cwd, timeout):
+                (Path(cwd) / "project/status.json").write_text(json.dumps({
+                    "phase": 4, "state": "in-review", "completed": [], "next": [], "blockers": [],
+                }), encoding="utf-8")
+                return 0
+            with mock.patch.object(workbench, "_run_codex", side_effect=documented_shape), \
+                    mock.patch.object(workbench.subprocess, "run", return_value=subprocess.CompletedProcess([], 1, "units pending", "")):
+                job = wait_for(workbench.start_generation(workspace, 4))
+            self.assertEqual(job["status"], "done", job["error"])
+            self.assertEqual(self.read(root, "project/status.json")["state"], "in-review")
+            self.assertEqual(self.unit_status(workspace, "page-map")["status"], "approved")
+
     def test_failed_phase_check_is_reported_without_failing_the_generation_job(self):
         with tempfile.TemporaryDirectory() as root:
-            workspace = self.init(root)
+            workspace = self.at_phase(self.init(root), 1)
             failed = subprocess.CompletedProcess([], 1, "missing review/01-directions.html", "")
             with mock.patch.object(workbench, "_run_codex", return_value=0), \
                     mock.patch.object(workbench.subprocess, "run", return_value=failed):
