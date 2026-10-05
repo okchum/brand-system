@@ -395,7 +395,11 @@ def check_units(ws, phase, status, manifest, latest_reviews, problems):
     if not isinstance(units, list):
         problems.append("project/status.json: units are required when the UI manifest is present")
         return
-    manifest_units = manifest
+    manifest_units = {
+        unit.get("id"): unit
+        for unit in manifest.get("units", [])
+        if isinstance(unit, dict) and present(unit, "id")
+    }
     for review_id in latest_reviews:
         if review_id not in manifest_units:
             problems.append("unit-review %s does not name a manifest unit" % review_id)
@@ -447,10 +451,11 @@ def check(ws, phase, release=False):
     if phase >= 3 and ui is not None:
         check_ui_config(ui, brief, problems)
     manifest = load_json(ws, "src/ui/ir/manifest.json", problems) if (ws / "src/ui/ir/manifest.json").is_file() else None
-    manifest_units = check_manifest(manifest, ws, problems) if phase >= 4 and manifest is not None else None
+    if phase >= 4 and manifest is not None:
+        check_manifest(manifest, ws, problems)
     status = check_status(ws, phase, problems) if (ws / "project/status.json").is_file() else None
     _, latest_reviews = check_approvals(ws, phase, release, problems) if (ws / "project/approvals.json").is_file() else ({}, {})
-    check_units(ws, phase, status, manifest_units, latest_reviews, problems)
+    check_units(ws, phase, status, manifest, latest_reviews, problems)
     return problems
 
 

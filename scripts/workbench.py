@@ -4,6 +4,7 @@ Usage: python3 scripts/workbench.py [DIRECTORY] [--port PORT]
 The server only writes inside the selected workspace after an explicit UI action.
 """
 import argparse
+import copy
 import json
 import os
 import threading
@@ -141,8 +142,11 @@ def _manifest_payload(stack_profile, platforms):
 
 def _manifest_hash(manifest):
     import hashlib
-    payload = dict(manifest)
+    payload = copy.deepcopy(manifest)
     payload.pop("hash", None)
+    for unit in payload.get("units", []):
+        if isinstance(unit, dict):
+            unit.pop("status", None)
     encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
     return "sha256:" + hashlib.sha256(encoded).hexdigest()
 
