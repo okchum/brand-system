@@ -3,31 +3,31 @@
 Usage: check_workspace.py WORKSPACE --phase N [--release]
 Exit: 0 clean, 1 findings, 2 usage (bad arguments or WORKSPACE is not a directory).
 
-The checker preserves the original file, status, and named gate checks. UI
-configuration and IR unit checks are added for the phases that create them.
+The checker preserves the legacy file, status, brief, direction, and named
+phase/gate checks. UI configuration and IR unit checks are added for the
+phases that create them.
+
+approvals.json is an append-only list. The last record naming a gate decides
+that gate: a later changes-requested, pending or malformed record withdraws an
+earlier approval. Unit reviews are likewise checked against the latest UI
+manifest. The checker validates presence and shape only; it cannot judge
+design quality or whether an approval was real.
 """
 import json
 import os
 import re
 import sys
 from pathlib import Path
+from validate_brief import validate_file
+import directions_check
 
-REQUIRED = {
-    0: ["brand.brief.json", "README.md", "project/plan.md", "project/status.json", "project/approvals.json",
-        "project/decisions.md", "project/handoff.md", "docs/scope-matrix.md", "docs/environment.md",
-        "docs/references.md", "docs/strategy.md", "docs/voice.md"],
-    1: ["review/01-directions.html"],
-    2: ["review/02-identity.html", "BRAND_SYSTEM.md", "config/brand.json",
-        "docs/logo.md", "docs/color.md", "docs/typography.md"],
-    3: ["review/03-system.html", "docs/accessibility.md", "config/quality.json"],
-    4: ["review/04-assets.html", "config/platforms.json", "config/exports.json",
-        "docs/platform-specs.md", "docs/licensing.md", "manifests/assets.source.json"],
-    5: ["review/05-release.html", "CHANGELOG.md", "docs/handoff-by-role.md", "reports/qa-report.md"],
-}
+CONFIG = Path(__file__).resolve().parent.parent / "config/phase_requirements.json"
+CONTRACT = json.loads(CONFIG.read_text(encoding="utf-8"))
+REQUIRED = {int(k): v["required"] for k, v in CONTRACT["phases"].items()}
 GATE_STATES = ("pending", "approved", "changes-requested")
 BLOCKER_FIELDS = ("reason", "impact", "owner", "workaround")
 APPROVAL_FIELDS = ("scope", "snapshot", "confirmation", "approvedAt")
-GATES = ["G%d" % k for k in range(1, 6)]
+GATES = CONTRACT["gates"]
 SKIP_DIRS = {".git", "node_modules", ".venv", "__pycache__"}
 EMPTY_OK = {".gitkeep", ".nojekyll", "__init__.py", "py.typed"}
 UI_PLATFORMS = ("web", "desktop", "ios", "android")
@@ -53,10 +53,10 @@ def contract_files(phase):
         requirements = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return []
-    # The frozen UI contract is checked at its creation phases; the release
-    # phase retains the pre-existing file and gate semantics.
+    # UI-created files extend the legacy phase contract without replacing it.
     result = []
-    for entry in requirements.get("phases", []):
+    ui_contract = requirements.get("uiContract", {})
+    for entry in ui_contract.get("phases", []):
         if isinstance(entry, dict) and type(entry.get("phase")) is int and entry["phase"] <= phase and phase <= 4:
             result.extend(rel for rel in entry.get("creates", []) if isinstance(rel, str))
     return result
@@ -290,6 +290,11 @@ def check_status(ws, phase, problems):
             missing = [k for k in BLOCKER_FIELDS if not (isinstance(b, dict) and b.get(k))]
             if missing:
                 problems.append("project/status.json: blocker #%d missing %s" % (i, ", ".join(missing)))
+    if status.get("state") not in CONTRACT["states"]:
+        problems.append("project/status.json: state must be one of %s" % CONTRACT["states"])
+    for key in ("completed", "next"):
+        if not isinstance(status.get(key), list) or any(not isinstance(item, str) or not item.strip() for item in status.get(key, [])):
+            problems.append("project/status.json: %s must be a list of non-blank strings" % key)
     units = status.get("units")
     if units is not None and not isinstance(units, list):
         problems.append("project/status.json: units must be a list")
@@ -372,7 +377,7 @@ def check_approvals(ws, phase, release, problems):
                 problems.append("approval #%d (%s): approved without %s" % (i, gate, ", ".join(missing)))
                 state = "invalid"
         latest_gates[gate] = state
-    needed = GATES[:max(phase - 1, 0)] + (["G5"] if release else [])
+    needed = CONTRACT["phases"][str(phase)]["requiresApprovals"] + (CONTRACT["releaseApprovals"] if release else [])
     for gate in needed:
         if latest_gates.get(gate) != "approved":
             problems.append("phase %d requires gate %s approved (latest record decides)" % (phase, gate))
@@ -446,13 +451,20 @@ def check(ws, phase, release=False):
     problems = []
     check_files(ws, phase, problems)
     brief = load_json(ws, "brand.brief.json", problems) if (ws / "brand.brief.json").is_file() else None
+    if (ws / "brand.brief.json").is_file():
+        problems.extend("brand.brief.json: " + e for e in validate_file(ws / "brand.brief.json"))
     check_brief(brief, problems)
+    review = ws / "review/01-directions.html"
+    if phase >= 1 and review.is_file():
+        problems.extend("review/01-directions.html: " + e for e in directions_check.check(review))
     ui = load_json(ws, "config/ui.json", problems) if (ws / "config/ui.json").is_file() else None
     if phase >= 3 and ui is not None:
         check_ui_config(ui, brief, problems)
     manifest = load_json(ws, "src/ui/ir/manifest.json", problems) if (ws / "src/ui/ir/manifest.json").is_file() else None
     if phase >= 4 and manifest is not None:
-        check_manifest(manifest, ws, problems)
+        manifest_units = check_manifest(manifest, ws, problems)
+    else:
+        manifest_units = None
     status = check_status(ws, phase, problems) if (ws / "project/status.json").is_file() else None
     _, latest_reviews = check_approvals(ws, phase, release, problems) if (ws / "project/approvals.json").is_file() else ({}, {})
     check_units(ws, phase, status, manifest, latest_reviews, problems)

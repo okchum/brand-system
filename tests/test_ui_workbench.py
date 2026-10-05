@@ -1,5 +1,6 @@
 import json
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -138,19 +139,39 @@ class UiWorkbenchTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "G1"):
             workbench.g1_choice([])
 
-    def test_start_generation_prompt_uses_selected_direction_not_default(self):
+    def test_phase_one_generation_does_not_require_g1(self):
         with tempfile.TemporaryDirectory() as root:
             workspace = self.init(root)
+            called = threading.Event()
+            def stop_before_process(*args, **kwargs):
+                called.set()
+                raise RuntimeError("stop before process")
+            with mock.patch.object(workbench.subprocess, "Popen") as popen:
+                popen.side_effect = stop_before_process
+                job_id = workbench.start_generation(workspace, 1, unit_id="page-map")
+                self.assertTrue(called.wait(1))
+            self.assertIn(job_id, workbench.JOBS)
+            self.assertNotIn("Direction B", workbench.JOBS[job_id]["prompt"])
+
+    def test_later_generation_requires_latest_valid_g1_and_uses_its_direction(self):
+        with tempfile.TemporaryDirectory() as root:
+            workspace = self.init(root)
+            with self.assertRaisesRegex(ValueError, "G1"):
+                workbench.start_generation(workspace, 2)
             approvals = [{
                 "kind": "gate", "gate": "G1", "status": "approved", "scope": "strategy",
-                "snapshot": "direction-A", "confirmation": "选 A", "approvedAt": "now", "version": "v1",
+                "snapshot": "direction-C", "confirmation": "选 C", "approvedAt": "now", "version": "v1",
             }]
             (workspace / "project/approvals.json").write_text(json.dumps(approvals), encoding="utf-8")
+            called = threading.Event()
+            def stop_before_process(*args, **kwargs):
+                called.set()
+                raise RuntimeError("stop before process")
             with mock.patch.object(workbench.subprocess, "Popen") as popen:
-                popen.side_effect = RuntimeError("stop before process")
-                job_id = workbench.start_generation(workspace, 1, unit_id="page-map")
-            self.assertIn(job_id, workbench.JOBS)
-            self.assertIn("Direction A", workbench.JOBS[job_id]["prompt"])
+                popen.side_effect = stop_before_process
+                job_id = workbench.start_generation(workspace, 2)
+                self.assertTrue(called.wait(1))
+            self.assertIn("Direction C", workbench.JOBS[job_id]["prompt"])
             self.assertNotIn("Direction B", workbench.JOBS[job_id]["prompt"])
 
 

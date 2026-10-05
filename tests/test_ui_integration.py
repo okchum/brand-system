@@ -136,7 +136,10 @@ class UiIntegrationTest(unittest.TestCase):
         (workspace / "project/status.json").write_text(json.dumps(status), encoding="utf-8")
         for phase in range(1, 6):
             for relative in check_workspace.REQUIRED[phase]:
-                self.write(workspace, relative, "fixture")
+                content = "fixture"
+                if relative == "review/01-directions.html":
+                    content = (ROOT / "evals/directions.fixture.html").read_text(encoding="utf-8")
+                self.write(workspace, relative, content)
         units = self.read(workspace, "src/ui/ir/manifest.json")["units"]
         for unit in units:
             unit_id = unit["id"]

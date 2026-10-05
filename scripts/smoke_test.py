@@ -93,7 +93,11 @@ def run():
             write_json(approvals_path, approvals)
             if phase == 1:
                 check_cli(workspace, phase, 1, needle="missing review/01-directions.html")
-                write_file(workspace, "review/01-directions.html", "directions fixture")
+                write_file(
+                    workspace,
+                    "review/01-directions.html",
+                    (ROOT / "evals/directions.fixture.html").read_text(encoding="utf-8"),
+                )
             elif phase >= 2:
                 for relative in check_workspace.REQUIRED[phase]:
                     write_file(workspace, relative)

@@ -1,2 +1,5 @@
 dist/
 __pycache__/
+.DS_Store
+.pytest_cache/
+.mypy_cache/

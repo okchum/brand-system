@@ -29,7 +29,7 @@ description: 为一个软件产品建立生产导向的完整品牌系统仓库�
 | `<skill>/scripts/contrast.py` | WCAG 对比度：单个配对或整个配对矩阵（JSON） |
 | `<skill>/scripts/svg_lint.py` | SVG 发布检查（白名单）：只允许静态图形元素和静态绘制用的 CSS 属性，脚本、链接、栅格、`foreignObject`、动画、过渡、滤镜等一律报出；拒绝 DOCTYPE 与 processing instruction；href/src 与所有 `url()` 只能指向文档内 `#片段`（不外链、不 `data:` 内嵌）；事件属性、viewBox、重复 id。确需新元素时改脚本里的 `ALLOWED` 并记录理由 |
 | `<skill>/scripts/icon_verify.py` | 按文件头判断 PNG/ICO/ICNS 的真实格式与尺寸，识别改扩展名冒充的文件 |
-| `<skill>/scripts/check_workspace.py` | `<工作区> --phase N [--release]`：检查阶段 0–N 应有的文件、整个工作区有无空文件或失效链接、brief 能否解析、状态文件格式、G1–G(N-1) 是否已批准；`--release` 另查 G5 |
+| `<skill>/scripts/check_workspace.py` | `<工作区> --phase N [--release]`：依据 `config/phase_requirements.json` 检查阶段文件、brief schema、状态契约、方向审阅 metadata、空文件/失效链接和审批门；`--release` 另查 G5 |
 
 脚本只用 Python 3.9 标准库；退出码 0 为通过、1 为有发现、2 为用法或输入错误（`build_prompt.py` 只有 0 和 2）。把输出保存到工作区的 `reports/`。脚本没覆盖的检查照常执行，在报告里注明方法。
 
@@ -61,7 +61,7 @@ description: 为一个软件产品建立生产导向的完整品牌系统仓库�
 
 ## 01. 输入与缺省处理
 
-优先读取用户已提供的资料及工作区的 `brand.brief.json`。没有时，把 `<skill>/assets/brief.template.json` 复制为工作区的 `brand.brief.json` 作为待填写版本；字段含义与类型见 `<skill>/assets/brief.schema.json`。模板里的空值不是品牌事实，不把占位当作品牌名称使用。
+优先读取用户已提供的资料及工作区的 `brand.brief.json`。没有时，优先启动 `<skill>/scripts/workbench.py` 打开浏览器工作台，由页面扫描目录并在用户选择后自动创建工作区和 `brand.brief.json`；不要求用户手工复制模板。字段含义与类型见 `<skill>/assets/brief.schema.json`。模板里的空值不是品牌事实，不把占位当作品牌名称使用。CLI/CI 环境没有浏览器时，才使用模板复制作为后备流程。
 
 至少收集：
 
@@ -172,7 +172,7 @@ UI 工作单元按页面地图 → 布局 → 复用 → 组件 → 页面 → �
 
 不要依赖聊天记忆作为唯一进度存储。每完成一个可验证工作单元，更新：
 
-- `project/status.json`：`{phase, state, completed, next, blockers}`；`phase` 为整数，`blockers` 为数组，每条是需外部工具/用户/供应商解决的问题，写成 `{reason, impact, owner, workaround}`。
+- `project/status.json`：`{phase, state, completed, next, blockers}`；`phase` 为整数；`state` 取 `draft / in-progress / in-review / approved / blocked / complete`；`completed` 与 `next` 为非空白字符串数组（允许空数组）；`blockers` 为数组，每条是需外部工具/用户/供应商解决的问题，写成 `{reason, impact, owner, workaround}`。
 - `project/plan.md`：剩余里程碑和验收条件。
 - `project/approvals.json`：只追加真实的审批、撤回或修改要求记录（格式见第 04 节），不改写旧记录。
 - `project/decisions.md`：简要结论、理由、取舍和影响。

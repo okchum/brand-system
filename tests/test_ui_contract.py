@@ -109,17 +109,22 @@ class UiContractTest(unittest.TestCase):
         )
         self.assertEqual(review["properties"]["fileScope"]["items"], {"$ref": "#/$defs/fileRange"})
 
-    def test_phase_requirements_only_lists_contract_files(self):
+    def test_phase_requirements_keep_legacy_contract_and_ui_extensions(self):
         requirements = json.loads((ROOT / "config/phase_requirements.json").read_text(encoding="utf-8"))
-        self.assertEqual(set(requirements), {"schemaVersion", "phases"})
-        self.assertEqual(requirements["schemaVersion"], "1.0.0")
-        self.assertEqual(requirements["phases"], [
-            {"phase": 3, "creates": ["config/ui.json"]},
-            {"phase": 4, "creates": ["src/ui/ir/manifest.json"]},
-        ])
-        serialized = json.dumps(requirements, ensure_ascii=False).lower()
-        self.assertNotIn("release", serialized)
-        self.assertNotIn("g5", serialized)
+        self.assertEqual(
+            set(requirements), {"states", "gates", "phases", "releaseApprovals", "uiContract"}
+        )
+        self.assertEqual(requirements["gates"], ["G1", "G2", "G3", "G4", "G5"])
+        self.assertEqual(requirements["phases"]["1"]["requiresApprovals"], [])
+        self.assertEqual(requirements["phases"]["2"]["requiresApprovals"], ["G1"])
+        self.assertEqual(requirements["releaseApprovals"], ["G5"])
+        self.assertEqual(requirements["uiContract"], {
+            "schemaVersion": "1.0.0",
+            "phases": [
+                {"phase": 3, "creates": ["config/ui.json"]},
+                {"phase": 4, "creates": ["src/ui/ir/manifest.json"]},
+            ],
+        })
 
     def test_docs_define_order_ssot_and_review_limits(self):
         ui = (ROOT / "references/ui.md").read_text(encoding="utf-8")

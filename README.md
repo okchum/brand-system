@@ -1,6 +1,6 @@
 # brand-system
 
-一个 agent skill：为软件产品建立生产导向的完整品牌系统仓库——策略、三套视觉方向、Logo 矢量母版、design tokens、产品 UI 规范、平台图标、营销/邮件/演示/印刷模板、自动导出、文档与 QA。分六个阶段推进，每阶段停在显式审批门。
+一个 agent skill：为软件产品建立生产导向的完整品牌系统仓库——策略、三套视觉方向、Logo 矢量母版、design tokens、产品 UI 规范、平台图标、营销/邮件/演示/印刷模板、自动导出、文档与 QA。分六个阶段推进，每阶段停在显式审批门。阶段文件清单与审批依赖以 `config/phase_requirements.json` 为唯一机器可读来源。
 
 ## 结构
 
@@ -11,6 +11,7 @@ assets/         brief 模板与 JSON Schema
 scripts/        确定性检查与单文件构建，只依赖 Python 3.9 标准库
 evals/          虚构示例 brief，用于试跑阶段 0–1
 tests/          scripts 与包结构的测试
+config/         阶段文件清单、状态值和审批依赖的机器可读契约
 ```
 
 ## 安装
@@ -23,6 +24,16 @@ ln -s "$PWD" ~/.codex/skills/brand-system    # Codex
 ```
 
 然后在品牌工作区（另一个目录）里描述需求即可触发；Claude Code 也可以用 `/brand-system` 直接调用。
+
+## 浏览器工作台
+
+推荐从工作区父目录启动本地工作台，自动扫描当前目录和一级子目录；不需要手工复制 brief 模板：
+
+```sh
+python3 scripts/workbench.py .
+```
+
+打开终端输出的 `http://127.0.0.1:8765/`。工作台会在同一页面浏览选择生成目录、填写产品信息，并可浏览选择只读的源码/文档参考目录。默认推荐在启动目录下创建 `brand`；当前目录有内容时，工作台不会静默覆盖文件。页面会把当前工作区和阶段写入 URL，方便后退和恢复进度，并提供滚动活动日志。
 
 ## 单文件版
 
@@ -51,6 +62,7 @@ python3 scripts/check_workspace.py <工作区> --phase 5 --release   # 发布前
 
 ```sh
 python3 -m unittest discover -s tests
+python3 scripts/smoke_test.py
 ```
 
 ## 试跑
