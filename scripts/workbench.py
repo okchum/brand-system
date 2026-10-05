@@ -670,6 +670,13 @@ def start_generation(path, phase):
     prompt = _phase_prompt(phase, choice)
     with STATE_LOCK:
         job_id = _create_job(path, prompt)
+        try:
+            before = _snapshot(path, PHASE_PROTECTED_ROOTS)
+            status_before = (path / "project/status.json").read_bytes()
+        except Exception:
+            with JOBS_LOCK:
+                JOBS.pop(job_id, None)
+            raise
 
     def run():
         cmd = ["codex", "exec", "--ephemeral", "--skip-git-repo-check", "-s", "danger-full-access", "-C", str(path), "--add-dir", str(path), "--add-dir", str(ROOT), "--json", prompt]
@@ -680,7 +687,26 @@ def start_generation(path, phase):
                 if item.is_file():
                     _job_log(job_id, "关键输入：" + str(item.relative_to(path)))
             _job_log(job_id, "正在生成 Phase %d 交付物…" % phase, "生成 Phase %d" % phase)
-            code = _run_codex(cmd, path, 600)
+            run_error, code = None, None
+            try:
+                code = _run_codex(cmd, path, 600)
+            except Exception as exc:
+                run_error = exc
+            # Approvals, the UI manifest, unit outputs and unit progress belong to other flows.
+            try:
+                changed = _restore(path, PHASE_PROTECTED_ROOTS, before) + _restore_unit_progress(path, status_before)
+            except Exception as restore_error:
+                raise RuntimeError(
+                    ("%s；" % run_error if run_error else "")
+                    + "恢复审批、UI 清单或 unit 内容时出错，这些文件可能仍被改动：%s" % restore_error
+                )
+            if changed:
+                raise RuntimeError(
+                    ("%s；" % run_error if run_error else "")
+                    + "生成进程改动了审批、UI 清单或 unit 的内容，已恢复原样：" + "、".join(changed)
+                )
+            if run_error:
+                raise run_error
             if code != 0:
                 raise RuntimeError("生成进程退出码 %d" % code)
             for item in sorted(item for item in path.rglob("*") if item.is_file() and ".git" not in item.parts):
@@ -720,22 +746,23 @@ def _review_prompt(unit):
 
 # Paths a unit job may not change outside its own unit directory.
 PROTECTED_ROOTS = ("brand.brief.json", "project", "config", "tokens", "src/ui/ir", "src/ui/units")
+# Paths a whole-phase job may not change: approvals, the UI manifest and unit outputs belong to other flows.
+PHASE_PROTECTED_ROOTS = ("project/approvals.json", "src/ui/ir", "src/ui/units")
 
 
-def _protected_snapshot(path, unit_id):
-    own = path / unit_dir(unit_id)
+def _snapshot(path, roots, excluded=None):
     files = {}
-    for root in PROTECTED_ROOTS:
+    for root in roots:
         base = path / root
         items = [base] if base.is_file() else base.rglob("*") if base.is_dir() else []
         for item in items:
-            if item.is_file() and not item.is_relative_to(own):
+            if item.is_file() and not (excluded and item.is_relative_to(excluded)):
                 files[str(item.relative_to(path))] = item.read_bytes()
     return files
 
 
-def _restore_outside_unit(path, unit_id, before):
-    after = _protected_snapshot(path, unit_id)
+def _restore(path, roots, before, excluded=None):
+    after = _snapshot(path, roots, excluded)
     changed = sorted(rel for rel in set(before) | set(after) if before.get(rel) != after.get(rel))
     for rel in changed:
         target = path / rel
@@ -745,6 +772,33 @@ def _restore_outside_unit(path, unit_id, before):
         else:
             target.unlink()
     return changed
+
+
+def _protected_snapshot(path, unit_id):
+    return _snapshot(path, PROTECTED_ROOTS, path / unit_dir(unit_id))
+
+
+def _restore_outside_unit(path, unit_id, before):
+    return _restore(path, PROTECTED_ROOTS, before, path / unit_dir(unit_id))
+
+
+def _restore_unit_progress(path, status_bytes):
+    """Put status.json's units back as they were; the phase job may still update phase and state."""
+    status_path = path / "project/status.json"
+    before = json.loads(status_bytes)
+    try:
+        current = json.loads(status_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        status_path.write_bytes(status_bytes)
+        return ["project/status.json"]
+    if not isinstance(current, dict):
+        status_path.write_bytes(status_bytes)
+        return ["project/status.json"]
+    if current.get("units") == before.get("units"):
+        return []
+    current["units"] = before.get("units", [])
+    _write_json(status_path, current)
+    return ["project/status.json 的 units"]
 
 
 def _review_unit(job_id, path, unit_id):

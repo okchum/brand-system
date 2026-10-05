@@ -482,6 +482,35 @@ class UiWorkbenchTest(unittest.TestCase):
             self.assertIn("no focus-visible style", job["prompt"])
             self.assertIn("Navigation misses focus state", job["prompt"])
 
+    def test_phase_job_cannot_change_approvals_units_or_unit_progress(self):
+        with tempfile.TemporaryDirectory() as root:
+            workspace = self.phase_four(root)
+            self.review(workspace, "page-map")
+            approvals = (workspace / "project/approvals.json").read_text(encoding="utf-8")
+            output = (workspace / workbench.unit_output_path("page-map")).read_text(encoding="utf-8")
+
+            def phase_job(cmd, cwd, timeout):
+                status_path = Path(cwd) / "project/status.json"
+                status = json.loads(status_path.read_text(encoding="utf-8"))
+                status["state"] = "in-review"
+                status["units"] = []
+                status_path.write_text(json.dumps(status), encoding="utf-8")
+                (Path(cwd) / "project/approvals.json").write_text("[]", encoding="utf-8")
+                write_output(cwd, "page-map", "<main>overwritten by the phase job</main>\n")
+                (Path(cwd) / "review/04-assets.html").parent.mkdir(parents=True, exist_ok=True)
+                (Path(cwd) / "review/04-assets.html").write_text("<main>assets</main>", encoding="utf-8")
+                return 0
+            with mock.patch.object(workbench, "_run_codex", side_effect=phase_job), \
+                    mock.patch.object(workbench.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, "", "")):
+                job = wait_for(workbench.start_generation(workspace, 4))
+            self.assertEqual(job["status"], "error")
+            self.assertIn("project/approvals.json", job["error"])
+            self.assertEqual((workspace / "project/approvals.json").read_text(encoding="utf-8"), approvals)
+            self.assertEqual((workspace / workbench.unit_output_path("page-map")).read_text(encoding="utf-8"), output)
+            self.assertEqual(self.unit_status(workspace, "page-map")["status"], "approved")
+            self.assertEqual(self.read(root, "project/status.json")["state"], "in-review")
+            self.assertTrue((workspace / "review/04-assets.html").is_file())
+
     def test_unit_job_requires_phase_four_gates_and_one_job_per_workspace(self):
         with tempfile.TemporaryDirectory() as root:
             workspace = self.init(root)

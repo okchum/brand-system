@@ -70,6 +70,8 @@
 
 自动审查由工作台另起一个只读的 `codex exec`（`-s read-only`），按 `assets/unit-review-verdict.schema.json` 输出结论并写入 `src/ui/units/<unitId>/review.json`；它与生成进程是两个独立进程，不复用生成时的上下文。生成 unit 时使用只针对该 unit 的 prompt，进程只能写工作区：生成与审查都不加 `--add-dir`，因为加进去的目录会变成可写，技能目录的参考文档只按绝对路径读取。重新生成时，prompt 带上该 unit 最近一条“要求修改”审查的全部证据和状态备注，生成进程据此逐条修改，而不是重复上一次的输出。进程结束后（包括失败和超时），工作台先核对 `brand.brief.json`、`project/`、`config/`、`tokens/`、`src/ui/ir/` 与其他 unit 目录有没有被改动，有就恢复原样，再报告结果；恢复本身出错时，错误信息会写明这些文件可能仍被改动。超时会结束 codex 及其启动的全部子进程后才开始核对。
 
+整阶段生成任务（各阶段的“生成”按钮）可以写工作区里的大多数文件，但不能改 `project/approvals.json`、`src/ui/ir/`、`src/ui/units/` 和 `status.json` 里的 `units`：这些属于审批和 unit 流程，改动会在任务结束（包括失败和超时）后恢复原样，并判为失败。
+
 生成任务的状态只反映生成（unit 任务还包括自动审查）是否成功。阶段检查的结果单独返回并显示在页面上：Phase 4 在所有 unit 审查完之前检查本来就不会通过，这不等于生成失败；推进阶段时仍以检查通过为前提。
 
 所有对 `project/status.json`、manifest 与 `project/approvals.json` 的读改写都在同一把锁内完成，同一工作区同一时间只运行一个任务；任务运行期间，记录审批与推进阶段的请求一律拒绝，否则 unit 任务结束时的越界检查会把这期间的合法写入当成越界改动恢复掉。
