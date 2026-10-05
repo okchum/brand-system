@@ -853,11 +853,11 @@ def _unit_prompt(path, unit, choice):
     ui = _read_json(path / "config/ui.json", {})
     units = {item["id"]: item for item in _read_json(path / "src/ui/ir/manifest.json").get("units", [])}
     inputs = "、".join(file for dep in unit.get("dependsOn", []) for file in units.get(dep, {}).get("files", [])) or "无"
-    return f"""只完成 UI unit「{unit['id']}」（类型 {unit.get('kind')}），把页面写到 {'、'.join(unit['files'])}。只写入 {unit_dir(unit['id'])}/ 目录；不要修改 project/、config/、src/ui/ir/、tokens/ 以及其他 unit 的目录。读取 src/ui/ir/manifest.json、config/ui.json、brand.brief.json、tokens/src/，以及依赖 unit 的输出：{inputs}。按 {ROOT / "references/ui.md"} 中该类型的要求完成（该文件只读）；颜色、字号、间距只引用 tokens/src 的 token，不复制数值。目标平台：{'、'.join(ui.get('platforms', []))}；技术栈：{ui.get('stackProfile', '')}；Desktop 与 Mobile 以 Web preview 呈现，同时写清平台语义，方便转换为 native 代码。品牌方向为 Direction {choice}。{_unit_feedback(path, unit['id'])}不要只解释，直接创建文件。"""
+    return f"""只完成 UI unit「{unit['id']}」（类型 {unit.get('kind')}），把页面写到 {'、'.join(unit['files'])}。只写入 {unit_dir(unit['id'])}/ 目录；不要修改 project/、config/、src/ui/ir/、tokens/ 以及其他 unit 的目录。读取 src/ui/ir/manifest.json、config/ui.json、brand.brief.json、tokens/src/，以及依赖 unit 的输出：{inputs}。按 {ROOT / "references/ui.md"} 中该类型的要求完成（该文件只读）；颜色、字号、间距只引用 tokens/src 的 token，不复制数值。工作台预览时会把 tokens/src 展开成 CSS 变量注入页面 <head>：变量名是 JSON 路径用 - 连接（color.light.canvas → var(--color-light-canvas)，space.4 → var(--space-4)），值里的 {{a.b}} 引用变成 var(--a-b)。页面只写 var(--…)，不要 fetch token 文件，不要重新声明这些变量或内联数值。目标平台：{'、'.join(ui.get('platforms', []))}；技术栈：{ui.get('stackProfile', '')}；Desktop 与 Mobile 以 Web preview 呈现，同时写清平台语义，方便转换为 native 代码。品牌方向为 Direction {choice}。{_unit_feedback(path, unit['id'])}不要只解释，直接创建文件。"""
 
 
 def _review_prompt(unit):
-    return f"""你是独立审查者，只读不写。审查 UI unit「{unit['id']}」（类型 {unit.get('kind')}）的输出 {'、'.join(unit['files'])}。对照 {ROOT / "references/ui.md"}、{ROOT / "references/accessibility.md"}、src/ui/ir/manifest.json 中该 unit 的 platforms 与 dependsOn、tokens/src/，以及依赖 unit 的输出。检查：是否满足该类型的职责，组件是否复用而不是重复造，状态（hover、focus-visible、disabled、loading、invalid、空、错误）是否齐全，颜色与间距是否只引用 token，平台语义是否写清，可访问性。每个问题给出严重度 P0–P3、位置和具体问题。metadata.json 里的 outputHash 与 manifestHash 由工作台按自己的算法计算和绑定，不要自行核对或把它们列为问题。只有没有 P0/P1 时结论才是 approved，否则是 changes-requested。"""
+    return f"""你是独立审查者，只读不写。审查 UI unit「{unit['id']}」（类型 {unit.get('kind')}）的输出 {'、'.join(unit['files'])}。对照 {ROOT / "references/ui.md"}、{ROOT / "references/accessibility.md"}、src/ui/ir/manifest.json 中该 unit 的 platforms 与 dependsOn、tokens/src/，以及依赖 unit 的输出。检查：是否满足该类型的职责，组件是否复用而不是重复造，状态（hover、focus-visible、disabled、loading、invalid、空、错误）是否齐全，颜色与间距是否只引用 token（工作台预览时会把 tokens/src 展开成 CSS 变量注入页面 <head>：变量名是 JSON 路径用 - 连接（color.light.canvas → var(--color-light-canvas)，space.4 → var(--space-4)），值里的 {{a.b}} 引用变成 var(--a-b)。页面引用的每个变量都应能在 tokens/src 找到；页面不需要也不应自己加载 token），平台语义是否写清，可访问性。每个问题给出严重度 P0–P3、位置和具体问题。metadata.json 里的 outputHash 与 manifestHash 由工作台按自己的算法计算和绑定，不要自行核对或把它们列为问题。只有没有 P0/P1 时结论才是 approved，否则是 changes-requested。"""
 
 
 # Paths a unit job may not change outside its own unit directory.
@@ -1236,6 +1236,43 @@ def start_review_job(path, phase, unit_id):
     return job_id
 
 
+TOKEN_NAME = re.compile(r"[A-Za-z0-9_-]+$")
+TOKEN_ALIAS = re.compile(r"\{([A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]+)*)\}")
+
+
+def token_css(path):
+    """tokens/src flattened to CSS custom properties: a leaf is an object with $value or value, named by its JSON path."""
+    declarations = []
+
+    def walk(node, names):
+        for key, child in node.items():
+            if not isinstance(child, dict) or key.startswith("$") or not TOKEN_NAME.match(key):
+                continue
+            value = child.get("$value", child.get("value"))
+            if isinstance(value, (str, int, float)) and not isinstance(value, bool):
+                value = TOKEN_ALIAS.sub(lambda m: "var(--%s)" % m.group(1).replace(".", "-"), str(value))
+                # Dropped rather than escaped: such a value could close the rule or the style element.
+                if not re.search(r"[;{}<>\\]", value):
+                    declarations.append("--%s:%s;" % ("-".join(names + [key]), value))
+            else:
+                walk(child, names + [key])
+
+    for item in sorted((path / "tokens/src").rglob("*.json")):
+        try:
+            data = json.loads(item.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if isinstance(data, dict):
+            walk(data, [])
+    return ":root{" + "".join(declarations) + "}"
+
+
+def _with_tokens(html, css):
+    tag = "<style data-brand-tokens>%s</style>" % css
+    match = re.search(r"<head[^>]*>", html, re.IGNORECASE)
+    return html[:match.end()] + tag + html[match.end():] if match else tag + html
+
+
 PREVIEW_TYPES = {".html": "text/html", ".htm": "text/html", ".md": "text/plain", ".txt": "text/plain", ".json": "application/json",
                  ".css": "text/css", ".js": "text/javascript", ".svg": "image/svg+xml", ".png": "image/png",
                  ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".webp": "image/webp", ".ico": "image/x-icon", ".pdf": "application/pdf"}
@@ -1303,7 +1340,11 @@ class Handler(BaseHTTPRequestHandler):
                     content_type += "; charset=utf-8"
                 # Generated pages run in an opaque origin: their scripts still run, but cannot call this API
                 # (their requests carry Origin: null) and so cannot approve their own review.
-                return self.send_body(target.read_bytes(), content_type, extra_headers=(
+                body = target.read_bytes()
+                # Unit pages cannot load tokens from a sandboxed origin, so the values are injected here.
+                if content_type.startswith("text/html") and Path(relative).parts[:2] == ("src", "ui"):
+                    body = _with_tokens(body.decode("utf-8", "replace"), token_css(preview_path)).encode("utf-8")
+                return self.send_body(body, content_type, extra_headers=(
                     ("Content-Security-Policy", "sandbox allow-scripts allow-popups"), ("X-Content-Type-Options", "nosniff")))
             if parsed.path == "/api/scan":
                 target = (self.root / Path(q["path"][0]).expanduser()).resolve() if q.get("path") else self.root

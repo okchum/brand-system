@@ -1110,6 +1110,42 @@ class UiWorkbenchHttpTest(unittest.TestCase):
                 self.assertIn("sandbox", response.headers["Content-Security-Policy"])
                 self.assertNotIn("allow-same-origin", response.headers["Content-Security-Policy"])
 
+    def write_tokens(self):
+        tokens = self.workspace / "tokens/src"
+        (tokens / "semantic").mkdir(parents=True, exist_ok=True)
+        (tokens / "color.json").write_text(json.dumps({
+            "$schema": "x", "name": "meta",
+            "color": {"mist": {"value": "#F8FBFA"}, "bad": {"value": "red;}</style><script>"}},
+            "space": {"4": {"$value": "16px"}, "bad key": {"value": "1px"}},
+        }), encoding="utf-8")
+        (tokens / "semantic/color.json").write_text(json.dumps(
+            {"color": {"light": {"canvas": {"$value": "{color.mist}"}, "ring": {"$value": "0 0 0 2px {color.mist}"}}}}
+        ), encoding="utf-8")
+
+    def test_token_css_flattens_both_value_spellings_and_aliases(self):
+        self.write_tokens()
+        css = workbench.token_css(self.workspace)
+        for line in ("--color-mist:#F8FBFA;", "--space-4:16px;", "--color-light-canvas:var(--color-mist);",
+                     "--color-light-ring:0 0 0 2px var(--color-mist);"):
+            self.assertIn(line, css)
+        # A value or name that could close the rule or the style element is dropped, not escaped.
+        self.assertNotIn("bad", css)
+        self.assertNotIn("<", css)
+
+    def test_preview_injects_tokens_into_unit_pages_only(self):
+        self.write_tokens()
+        for relative in ("src/ui/units/page-map/output.html", "review/page.html"):
+            (self.workspace / relative).parent.mkdir(parents=True, exist_ok=True)
+            (self.workspace / relative).write_text("<html><head><title>t</title></head><body>x</body></html>", encoding="utf-8")
+        def fetch(relative):
+            url = "%s/preview?path=%s&file=%s" % (self.base, self.urllib.parse.quote(str(self.workspace)), relative)
+            with self.urllib.request.urlopen(url) as response:
+                return response.read().decode("utf-8")
+        unit = fetch("src/ui/units/page-map/output.html")
+        self.assertIn("<head><style data-brand-tokens>:root{", unit)
+        self.assertIn("--color-mist:#F8FBFA;", unit)
+        self.assertNotIn("data-brand-tokens", fetch("review/page.html"))
+
     def test_init_stays_inside_the_startup_directory(self):
         code, payload = self.call("/api/init", {"path": "../outside", "official": "X", "oneLiner": "x"})
         self.assertEqual(code, 400)
