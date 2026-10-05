@@ -38,7 +38,7 @@ UNIT_KINDS = ("page-map", "layout", "reuse-analysis", "component", "page", "plat
 UNIT_STATUSES = ("not-started", "in-progress", "in-review", "approved", "changes-requested", "completed")
 DONE_UNIT_STATUSES = ("approved", "completed")
 REVIEW_CONCLUSIONS = ("approved", "changes-requested")
-MANIFEST_HASH_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
+SHA256_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 ROOT = Path(__file__).resolve().parents[1]
 
 
@@ -211,7 +211,7 @@ def check_manifest(manifest, ws, problems):
             problems.append("src/ui/ir/manifest.json: %s is required" % key)
     if not present(manifest, "manifestVersion"):
         problems.append("src/ui/ir/manifest.json: manifestVersion must be a non-empty string")
-    if not isinstance(manifest.get("hash"), str) or not MANIFEST_HASH_RE.match(manifest.get("hash", "")):
+    if not isinstance(manifest.get("hash"), str) or not SHA256_RE.match(manifest.get("hash", "")):
         problems.append("src/ui/ir/manifest.json: manifest hash must match sha256:<64 lowercase hex>")
     units = manifest.get("units")
     if not isinstance(units, list) or not units:
@@ -326,7 +326,7 @@ def check_unit_review(record, index, problems):
     if not present(record, "manifestVersion"):
         problems.append("approval #%d (unit-review): manifestVersion is required" % index)
     for key in ("manifestHash", "outputHash"):
-        if not isinstance(record.get(key), str) or not MANIFEST_HASH_RE.match(record[key]):
+        if not isinstance(record.get(key), str) or not SHA256_RE.match(record[key]):
             problems.append("approval #%d (unit-review): %s is invalid" % (index, key))
     if not valid_file_scope(record.get("fileScope")):
         problems.append("approval #%d (unit-review): fileScope is invalid" % index)
@@ -335,6 +335,10 @@ def check_unit_review(record, index, problems):
         problems.append("approval #%d (unit-review): reviewer must be a named subagent" % index)
     if record.get("conclusion") not in REVIEW_CONCLUSIONS:
         problems.append("approval #%d (unit-review): conclusion is invalid" % index)
+    elif record.get("status") != record.get("conclusion"):
+        problems.append("approval #%d (unit-review): status must equal conclusion" % index)
+    if "summary" in record and not present(record, "summary"):
+        problems.append("approval #%d (unit-review): summary must be non-empty text" % index)
     evidence = record.get("evidence")
     if not isinstance(evidence, list) or not evidence or any(not isinstance(item, str) or not item.strip() for item in evidence):
         problems.append("approval #%d (unit-review): evidence must be a non-empty string array" % index)

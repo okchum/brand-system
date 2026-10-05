@@ -195,6 +195,13 @@ class UiCheckerTest(unittest.TestCase):
         self.assert_finding(findings, "outputHash is invalid")
         self.assert_finding(findings, "reviewer must be a named subagent")
 
+    def test_unit_review_status_must_equal_conclusion_and_summary_must_be_text(self):
+        review = self.approved_review("map", conclusion="changes-requested")
+        review["summary"] = "  "
+        findings = self.findings(approvals=[review])
+        self.assert_finding(findings, "status must equal conclusion")
+        self.assert_finding(findings, "summary must be non-empty text")
+
     def test_each_manifest_unit_requires_its_own_review(self):
         status = {"phase": 4, "blockers": [], "units": [
             {"unitId": "map", "status": "approved"},

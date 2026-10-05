@@ -132,8 +132,11 @@ def _read_json(path, default=None):
 
 
 def _write_json(path, payload):
+    # Write then rename, so a concurrent /api/state poll never reads half a file.
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    temporary = path.with_name(path.name + ".tmp")
+    temporary.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    os.replace(temporary, path)
 
 
 def _validate_ui_selection(stack_profile, platforms):
@@ -311,7 +314,7 @@ def g1_choice(records):
     raise ValueError("缺少有效 G1 approved 方向选择")
 
 
-def append_unit_review(workspace, unit_id, conclusion, reviewer, evidence, file_scope, output_hash):
+def append_unit_review(workspace, unit_id, conclusion, reviewer, evidence, file_scope, output_hash, summary=None):
     if conclusion not in check_workspace.REVIEW_CONCLUSIONS:
         raise ValueError("unit review conclusion 无效")
     if not isinstance(reviewer, dict) or reviewer.get("type") != "subagent" or not str(reviewer.get("name") or "").strip():
@@ -320,6 +323,8 @@ def append_unit_review(workspace, unit_id, conclusion, reviewer, evidence, file_
         raise ValueError("unit review 必须包含非空 evidence")
     if not isinstance(file_scope, list) or not file_scope:
         raise ValueError("unit review 必须包含 fileScope")
+    if summary is not None and (not isinstance(summary, str) or not summary.strip()):
+        raise ValueError("unit review summary 必须是非空文字")
     workspace = Path(workspace).expanduser().resolve()
     with STATE_LOCK:
         manifest = _read_json(workspace / "src/ui/ir/manifest.json")
@@ -349,6 +354,8 @@ def append_unit_review(workspace, unit_id, conclusion, reviewer, evidence, file_
             "status": conclusion,
             "reviewedAt": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         }
+        if summary is not None:
+            record["summary"] = summary.strip()
         approvals_path = workspace / "project/approvals.json"
         approvals = _read_json(approvals_path, [])
         approvals.append(record)
@@ -391,6 +398,7 @@ def unit_overview(workspace):
             "review": None if review is None else {
                 "conclusion": review.get("conclusion"),
                 "reviewer": (review.get("reviewer") or {}).get("name"),
+                "summary": review.get("summary") or "",
                 "evidence": review.get("evidence", []),
                 "current": check_workspace.review_current(workspace, review, manifest, unit),
             },
@@ -510,9 +518,17 @@ def _run_codex(cmd, cwd, timeout):
     return proc.wait()
 
 
-def _running_job(path):
+def _active_job(path):
     with JOBS_LOCK:
-        return next((job_id for job_id, job in JOBS.items() if job.get("path") == str(path) and job["status"] == "running"), None)
+        for job_id, job in JOBS.items():
+            if job.get("path") == str(path) and job["status"] == "running":
+                return {"id": job_id, "unitId": job.get("unitId")}
+    return None
+
+
+def _running_job(path):
+    job = _active_job(path)
+    return job["id"] if job else None
 
 
 def _create_job(path, prompt, unit_id=None):
@@ -554,12 +570,80 @@ def _record_phase_check(job_id, path, phase):
     _job_log(job_id, ("检查通过。" if check.returncode == 0 else "检查未通过：") + ("" if check.returncode == 0 else output))
 
 
-def _require_gates(path, phase):
+def _missing_gates(path, phase):
+    """Gates config/phase_requirements.json requires for `phase` whose latest record is not approved."""
     records = _read_json(path / "project/approvals.json", [])
     latest = {item.get("gate"): item.get("status") for item in records if isinstance(item, dict) and item.get("kind", "gate") == "gate"}
-    missing = [gate for gate in ("G1", "G2", "G3", "G4")[:max(phase - 1, 0)] if latest.get(gate) != "approved"]
+    required = check_workspace.CONTRACT["phases"].get(str(phase), {}).get("requiresApprovals", [])
+    return [gate for gate in required if latest.get(gate) != "approved"]
+
+
+def _require_gates(path, phase):
+    missing = _missing_gates(path, phase)
     if missing:
         raise ValueError("Phase %d 生成前必须完成审批：%s" % (phase, ", ".join(missing)))
+
+
+def _refuse_while_running(path):
+    if _running_job(path):
+        raise ValueError("该工作区有任务正在运行，完成后再记录审批、推进阶段或重新初始化")
+
+
+GATE_SPECS = {
+    "G1": (1, "Phase 1 strategy and selected visual direction", "用户在工作台选择方向 %s 并确认 G1"),
+    "G2": (2, "Phase 2 core identity", "用户在工作台查看 Phase 2 身份审阅页并确认 G2"),
+    "G3": (3, "Phase 3 design system", "用户在工作台查看 Phase 3 系统审阅页并确认 G3"),
+    "G4": (4, "Phase 4 platform assets", "用户在工作台查看 Phase 4 资产审阅页并确认 G4"),
+}
+GATE_SNAPSHOTS = {"G2": "review-02-identity", "G3": "review-03-system", "G4": "review-04-assets"}
+GATE_REVIEW_PAGES = {"G1": "方向审阅页", "G2": "身份审阅页", "G3": "系统审阅页", "G4": "资产审阅页"}
+
+
+def record_gate(path, gate, choice=None):
+    if gate not in GATE_SPECS:
+        raise ValueError("只支持 G1、G2、G3 或 G4 审批")
+    if gate == "G1" and choice not in ("A", "B", "C"):
+        raise ValueError("G1 必须选择 A、B 或 C 方向")
+    required_phase, scope, confirmation = GATE_SPECS[gate]
+    with STATE_LOCK:
+        _refuse_while_running(path)
+        if int(_read_json(path / "project/status.json").get("phase", -1)) < required_phase:
+            raise ValueError("当前阶段还不能记录 %s" % gate)
+        approvals_path = path / "project/approvals.json"
+        records = _read_json(approvals_path, [])
+        records.append({
+            "kind": "gate", "gate": gate, "status": "approved", "scope": scope,
+            "snapshot": "direction-%s" % choice if gate == "G1" else GATE_SNAPSHOTS[gate],
+            "confirmation": confirmation % choice if gate == "G1" else confirmation,
+            "approvedAt": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            "version": "workbench-%s-%d" % (gate.lower(), int(time.time())),
+        })
+        _write_json(approvals_path, records)
+
+
+def advance_phase(path, from_phase):
+    # The lock is held across the checker run so no job can start between the check and the write.
+    with STATE_LOCK:
+        _refuse_while_running(path)
+        status_path = path / "project/status.json"
+        status = _read_json(status_path)
+        phase = int(status["phase"])
+        if phase != from_phase:
+            raise ValueError("工作区阶段已经变化，请刷新后重试")
+        if phase >= 5:
+            raise ValueError("已经是最后阶段")
+        missing = _missing_gates(path, phase + 1)
+        if missing:
+            raise ValueError("Phase %d 已生成交付物，但不能进入 Phase %d：请先查看%s并确认 %s" % (
+                phase, phase + 1, GATE_REVIEW_PAGES.get(missing[-1], "审阅页"), "、".join(missing)))
+        check = subprocess.run([sys.executable, str(ROOT / "scripts/check_workspace.py"), str(path), "--phase", str(phase)], capture_output=True, text=True)
+        if check.returncode != 0:
+            raise ValueError("当前阶段检查未通过，不能推进：\n" + check.stdout + check.stderr)
+        status["phase"] = phase + 1
+        status["state"] = "draft"
+        status["next"] = ["complete current phase", "run phase check"]
+        _write_json(status_path, status)
+        return phase + 1
 
 
 def _require_unit_phase(path, phase):
@@ -586,7 +670,8 @@ def start_generation(path, phase):
     path = Path(path).expanduser().resolve()
     choice = g1_choice(_read_json(path / "project/approvals.json", [])) if phase >= 2 else None
     prompt = _phase_prompt(phase, choice)
-    job_id = _create_job(path, prompt)
+    with STATE_LOCK:
+        job_id = _create_job(path, prompt)
 
     def run():
         cmd = ["codex", "exec", "--ephemeral", "--skip-git-repo-check", "-s", "danger-full-access", "-C", str(path), "--add-dir", str(path), "--add-dir", str(ROOT), "--json", prompt]
@@ -698,7 +783,7 @@ def _review_unit(job_id, path, unit_id):
             "%s %s：%s" % (item["severity"], item.get("location", ""), item.get("problem", "")) for item in findings
         ]
         scope = [{"path": unit_output_path(unit_id), "startLine": 1, "endLine": max(1, len(output.read_text(encoding="utf-8").splitlines()))}]
-        record = append_unit_review(path, unit_id, verdict["conclusion"], UNIT_REVIEWER, evidence, scope, digest)
+        record = append_unit_review(path, unit_id, verdict["conclusion"], UNIT_REVIEWER, evidence, scope, digest, verdict["summary"])
     _job_log(job_id, "审查结论：%s · %s" % (verdict["conclusion"], verdict["summary"].strip()))
     return record
 
@@ -724,18 +809,20 @@ def start_unit_job(path, phase, unit_id):
     choice = g1_choice(_read_json(path / "project/approvals.json", []))
     unit = _unit_record(_read_json(path / "src/ui/ir/manifest.json"), unit_id)
     prompt = _unit_prompt(path, unit, choice)
-    job_id = _create_job(path, prompt, unit_id)
-    try:
-        # Snapshot first: if it fails nothing has changed yet. begin_unit_generation then rewrites the two
-        # state files itself, and those writes must count as "before" or the restore would undo them.
-        before = _protected_snapshot(path, unit_id)
-        begin_unit_generation(path, unit_id)
-        for rel in ("project/status.json", "src/ui/ir/manifest.json"):
-            before[rel] = (path / rel).read_bytes()
-    except Exception:
-        with JOBS_LOCK:
-            JOBS.pop(job_id, None)
-        raise
+    # Claim and snapshot under STATE_LOCK: an approval or advance holding the lock cannot land between them.
+    with STATE_LOCK:
+        job_id = _create_job(path, prompt, unit_id)
+        try:
+            # Snapshot first: if it fails nothing has changed yet. begin_unit_generation then rewrites the
+            # state files itself, and those writes must count as "before" or the restore would undo them.
+            before = _protected_snapshot(path, unit_id)
+            begin_unit_generation(path, unit_id)
+            for rel in ("project/status.json", "src/ui/ir/manifest.json"):
+                before[rel] = (path / rel).read_bytes()
+        except Exception:
+            with JOBS_LOCK:
+                JOBS.pop(job_id, None)
+            raise
 
     def run():
         # No --add-dir: extra dirs become writable, and the skill repo must stay out of a unit job's reach.
@@ -779,9 +866,10 @@ def start_review_job(path, phase, unit_id):
     """Re-run only the independent review for a unit whose output is waiting for one."""
     path = Path(path).expanduser().resolve()
     _require_unit_phase(path, phase)
-    if _unit_states(path).get(unit_id) != "in-review":
-        raise ValueError("只有等待审查的 unit 可以重新审查")
-    job_id = _create_job(path, "review " + unit_id, unit_id)
+    with STATE_LOCK:
+        if _unit_states(path).get(unit_id) != "in-review":
+            raise ValueError("只有等待审查的 unit 可以重新审查")
+        job_id = _create_job(path, "review " + unit_id, unit_id)
 
     def run():
         try:
@@ -836,8 +924,7 @@ class Handler(BaseHTTPRequestHandler):
                 payload["uiConfig"] = _read_json(path / "config/ui.json", {})
                 payload["manifest"] = _read_json(path / "src/ui/ir/manifest.json", {})
                 payload["uiUnits"] = unit_overview(path)
-                job_id = _running_job(path)
-                payload["activeJob"] = {"id": job_id, "unitId": JOBS[job_id].get("unitId")} if job_id else None
+                payload["activeJob"] = _active_job(path)
                 return self.send_json(payload)
             if parsed.path == "/api/job":
                 job_id = q.get("id", [""])[0]
@@ -857,41 +944,24 @@ class Handler(BaseHTTPRequestHandler):
         if endpoint not in {"/api/init", "/api/advance", "/api/generate", "/api/review", "/api/approve"}: return self.send_json({"error": "not found"}, 404)
         try:
             body = json.loads(self.rfile.read(int(self.headers.get("Content-Length", "0"))))
-            if endpoint in ("/api/approve", "/api/advance") and _running_job(self.workspace_path(body.get("path", ""))):
-                raise ValueError("该工作区有任务正在运行，完成后再记录审批或推进阶段")
             if endpoint == "/api/approve":
                 path = self.workspace_path(body.get("path", ""))
                 if body.get("kind") == "unit-review":
-                    record = append_unit_review(
-                        path,
-                        body.get("unitId", ""),
-                        body.get("conclusion", ""),
-                        body.get("reviewer"),
-                        body.get("evidence"),
-                        body.get("fileScope"),
-                        body.get("outputHash"),
-                    )
+                    with STATE_LOCK:
+                        _refuse_while_running(path)
+                        record = append_unit_review(
+                            path,
+                            body.get("unitId", ""),
+                            body.get("conclusion", ""),
+                            body.get("reviewer"),
+                            body.get("evidence"),
+                            body.get("fileScope"),
+                            body.get("outputHash"),
+                            body.get("summary"),
+                        )
                     return self.send_json({"ok": True, "record": record})
-                gate = body.get("gate")
-                gate_specs = {
-                    "G1": (1, "Phase 1 strategy and selected visual direction", "direction-%s" % body.get("choice"), "用户在工作台选择方向 %s 并确认 G1" % body.get("choice")),
-                    "G2": (2, "Phase 2 core identity", "review-02-identity", "用户在工作台查看 Phase 2 身份审阅页并确认 G2"),
-                    "G3": (3, "Phase 3 design system", "review-03-system", "用户在工作台查看 Phase 3 系统审阅页并确认 G3"),
-                    "G4": (4, "Phase 4 platform assets", "review-04-assets", "用户在工作台查看 Phase 4 资产审阅页并确认 G4"),
-                }
-                if gate not in gate_specs:
-                    raise ValueError("只支持 G1、G2、G3 或 G4 审批")
-                if gate == "G1" and body.get("choice") not in ("A", "B", "C"):
-                    raise ValueError("G1 必须选择 A、B 或 C 方向")
-                required_phase, scope, snapshot, confirmation = gate_specs[gate]
-                status = json.loads((path / "project/status.json").read_text(encoding="utf-8"))
-                if int(status.get("phase", -1)) < required_phase:
-                    raise ValueError("当前阶段还不能记录 %s" % gate)
-                approvals_path = path / "project/approvals.json"
-                records = json.loads(approvals_path.read_text(encoding="utf-8"))
-                records.append({"gate":gate,"status":"approved","scope":scope,"snapshot":snapshot,"confirmation":confirmation,"approvedAt":time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),"version":"workbench-%s-%d" % (gate.lower(), int(time.time()))})
-                approvals_path.write_text(json.dumps(records, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-                return self.send_json({"ok": True, "gate": gate})
+                record_gate(path, body.get("gate"), body.get("choice"))
+                return self.send_json({"ok": True, "gate": body.get("gate")})
             if endpoint == "/api/generate":
                 path = self.workspace_path(body.get("path", ""))
                 status = _read_json(path / "project/status.json")
@@ -909,32 +979,12 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_json({"job": start_review_job(path, int(body.get("phase", 0)), unit_id), "unitId": unit_id})
             if endpoint == "/api/advance":
                 path = self.workspace_path(body.get("path", ""))
-                status_path = path / "project/status.json"
-                status = json.loads(status_path.read_text(encoding="utf-8"))
-                phase = int(status["phase"])
-                if phase != int(body.get("fromPhase", -1)):
-                    raise ValueError("工作区阶段已经变化，请刷新后重试")
-                if phase >= 5:
-                    raise ValueError("已经是最后阶段")
-                required_gate = {1: "G1", 2: "G2", 3: "G3", 4: "G4"}.get(phase)
-                if required_gate:
-                    records = json.loads((path / "project/approvals.json").read_text(encoding="utf-8"))
-                    latest = {item.get("gate"): item.get("status") for item in records if isinstance(item, dict)}
-                    if latest.get(required_gate) != "approved":
-                        review_names = {"G1": "方向审阅页", "G2": "身份审阅页", "G3": "系统审阅页", "G4": "资产审阅页"}
-                        raise ValueError("Phase %d 已生成交付物，但不能进入 Phase %d：请先查看%s并确认 %s" % (phase, phase + 1, review_names[required_gate], required_gate))
-                import subprocess, sys
-                check = subprocess.run([sys.executable, str(ROOT / "scripts/check_workspace.py"), str(path), "--phase", str(phase)], capture_output=True, text=True)
-                if check.returncode != 0:
-                    raise ValueError("当前阶段检查未通过，不能推进：\n" + check.stdout + check.stderr)
-                status["phase"] = phase + 1
-                status["state"] = "draft"
-                status["next"] = ["complete current phase", "run phase check"]
-                status_path.write_text(json.dumps(status, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-                return self.send_json({"path": str(path), "phase": phase + 1})
+                return self.send_json({"path": str(path), "phase": advance_phase(path, int(body.get("fromPhase", -1)))})
             target = Path(body.get("path") or (self.root / "brand-workspace"))
             if not target.is_absolute(): target = self.root / target
-            path = init_workspace(target, body.get("official", ""), body.get("oneLiner", ""), body.get("sourcePath") or None, body.get("capabilities") or [], body.get("stackProfile", "html-css-js"), body.get("platforms"))
+            with STATE_LOCK:
+                _refuse_while_running(target.expanduser().resolve())
+                path = init_workspace(target, body.get("official", ""), body.get("oneLiner", ""), body.get("sourcePath") or None, body.get("capabilities") or [], body.get("stackProfile", "html-css-js"), body.get("platforms"))
             self.send_json({"path": str(path)})
         except Exception as exc: self.send_json({"error": str(exc)}, 400)
     def log_message(self, *_): pass

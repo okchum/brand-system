@@ -164,6 +164,7 @@
         "manifestHash": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
         "outputHash": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
         "reviewedAt": { "type": "string", "minLength": 1 },
+        "summary": { "type": "string", "minLength": 1 },
         "fileScope": {
           "type": "array",
           "items": { "$ref": "#/$defs/fileRange" },

@@ -561,6 +561,40 @@ class UiWorkbenchHttpTest(unittest.TestCase):
             with error:
                 return error.code, json.loads(error.read())
 
+    def set_phase(self, phase):
+        status_path = self.workspace / "project/status.json"
+        status = json.loads(status_path.read_text(encoding="utf-8"))
+        status["phase"] = phase
+        status_path.write_text(json.dumps(status), encoding="utf-8")
+
+    def test_gate_records_carry_kind_and_writes_are_refused_while_a_job_runs(self):
+        self.set_phase(1)
+        code, payload = self.call("/api/approve", {"path": str(self.workspace), "gate": "G1", "choice": "B"})
+        self.assertEqual(code, 200, payload)
+        record = json.loads((self.workspace / "project/approvals.json").read_text(encoding="utf-8"))[-1]
+        self.assertEqual(record["kind"], "gate")
+        self.assertEqual(record["snapshot"], "direction-B")
+        workbench.JOBS["fake-running"] = {"status": "running", "path": str(self.workspace), "logs": [], "unitId": None}
+        try:
+            for endpoint, body in (
+                ("/api/approve", {"path": str(self.workspace), "gate": "G1", "choice": "A"}),
+                ("/api/advance", {"path": str(self.workspace), "fromPhase": 1}),
+                ("/api/init", {"path": str(self.workspace), "official": "Other", "oneLiner": "x"}),
+            ):
+                code, payload = self.call(endpoint, body)
+                self.assertEqual(code, 400, endpoint)
+                self.assertIn("任务正在运行", payload["error"])
+            code, payload = self.call("/api/state?path=" + str(self.workspace))
+            self.assertEqual(payload["activeJob"]["id"], "fake-running")
+        finally:
+            workbench.JOBS.pop("fake-running", None)
+
+    def test_advance_requires_the_gates_the_phase_contract_names(self):
+        self.set_phase(1)
+        code, payload = self.call("/api/advance", {"path": str(self.workspace), "fromPhase": 1})
+        self.assertEqual(code, 400)
+        self.assertIn("G1", payload["error"])
+
     def test_state_exposes_unit_overview(self):
         code, payload = self.call("/api/state?path=" + str(self.workspace))
         self.assertEqual(code, 200)
