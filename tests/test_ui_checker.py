@@ -195,6 +195,11 @@ class UiCheckerTest(unittest.TestCase):
         self.assert_finding(findings, "outputHash is invalid")
         self.assert_finding(findings, "reviewer must be a named subagent")
 
+    def test_manifest_unit_ids_must_be_safe_directory_names(self):
+        manifest = self.valid_manifest()
+        manifest["units"][1]["id"] = "../layout"
+        self.assert_finding(self.findings(manifest=manifest), "id must use lowercase letters, digits and hyphens")
+
     def test_ui_config_agent_settings_are_checked(self):
         ui = dict(self.valid_ui(), agents={"review": {"engine": "claude", "reasoningEffort": "max"}})
         self.assertNotIn("agents", " ".join(self.findings(ui=ui)))

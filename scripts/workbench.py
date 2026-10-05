@@ -59,7 +59,7 @@ let activeJob='',activeJobPhase=0,activeJobUnit='',pollErrors=0;
 const AGENT_EFFORTS=__AGENT_EFFORTS__;const ENGINE_LABELS={codex:'codex',claude:'Claude Code'};
 function fillEfforts(role){const engine=$('#agent'+role+'Engine').value,select=$('#agent'+role+'Effort'),keep=select.value;select.replaceChildren(new Option('推理强度：默认',''));for(const level of AGENT_EFFORTS[engine]||[])select.add(new Option(level,level));select.value=(AGENT_EFFORTS[engine]||[]).includes(keep)?keep:''}
 function agentSettings(){const pick=role=>({engine:$('#agent'+role+'Engine').value,model:$('#agent'+role+'Model').value.trim(),reasoningEffort:$('#agent'+role+'Effort').value});return {generation:pick('Generation'),review:pick('Review')}}
-function agentSummary(agents){const part=(label,s)=>label+'：'+esc(ENGINE_LABELS[s?.engine||'codex'])+' · '+esc(s?.model||'默认模型')+' · '+esc(s?.reasoningEffort||'默认强度');return part('生成',agents?.generation)+'；'+part('审查',agents?.review)}
+function agentSummary(agents){const part=(label,s)=>label+'：'+esc(ENGINE_LABELS[s?.engine||'codex']||s.engine)+' · '+esc(s?.model||'默认模型')+' · '+esc(s?.reasoningEffort||'默认强度');return part('生成',agents?.generation)+'；'+part('审查',agents?.review)}
 const UNIT_LABELS={'page-map':'页面地图','layout':'布局','reuse-analysis':'复用分析','component':'组件','page':'页面','platform-adaptation':'平台适配'};const UNIT_STATUS={'not-started':'未开始','in-progress':'生成中','in-review':'待审查','approved':'已通过','changes-requested':'需要修改'};
 function renderUnits(overview){const box=$('#unitPanel');const units=overview.units;if(!box||!units.length)return;const blocker=overview.phaseBlocker;box.innerHTML='<h4>UI 工作单元</h4><p class="muted">按依赖顺序逐个生成；每个 unit 生成后由独立的只读审查进程给出结论，通过后才解锁下游。</p>'+(blocker?'<p class="muted">'+esc(blocker)+'</p>':'')+units.map(u=>{const review=u.review?'<p>审查（'+esc(u.review.reviewer||'subagent')+'）：'+esc(UNIT_STATUS[u.review.conclusion]||u.review.conclusion)+(u.review.current?'':' · 输出已变化，结论不再适用')+(u.review.summary?' · '+esc(u.review.summary):'')+'</p>':'';const waiting=u.blockedBy.length?' · 等待：'+u.blockedBy.map(d=>esc(UNIT_LABELS[d]||d)).join('、'):'';const preview=u.outputExists?'<a class="review-link" target="_blank" rel="noopener" href="/preview?path='+encodeURIComponent(current)+'&file='+encodeURIComponent(u.output)+'">查看输出</a>':'';const generate='<button data-unit="'+esc(u.id)+'" data-action="generate"'+(u.canGenerate?'':' disabled')+'>'+(u.status==='not-started'?'生成并审查':'重新生成并审查')+'</button>';const again=u.status==='in-review'?'<button class="secondary" data-unit="'+esc(u.id)+'" data-action="review"'+(u.canReview?'':' disabled')+'>只重新审查</button>':'';return '<div class="unit-row"><h5>'+esc(UNIT_LABELS[u.id]||u.id)+' · '+esc(UNIT_STATUS[u.status]||u.status)+'</h5><p class="muted">依赖：'+(u.dependsOn.length?u.dependsOn.map(d=>esc(UNIT_LABELS[d]||d)).join('、'):'无')+waiting+'</p>'+(u.note?'<p class="error">'+esc(u.note)+'</p>':'')+review+'<div class="unit-actions">'+generate+again+preview+'</div></div>'}).join('');box.onclick=e=>{const b=e.target.closest('button[data-unit]');if(b&&!b.disabled)runUnit(b.dataset.unit,b.dataset.action)}}
 async function runUnit(unitId,action){if(!current||activeJob)return;document.querySelectorAll('#unitPanel button').forEach(b=>b.disabled=true);try{const j=await get(action==='review'?'/api/review':'/api/generate',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({path:current,phase:activePhase,unitId})});activeJob=j.job;pollErrors=0;activeJobPhase=activePhase;activeJobUnit=unitId;log((action==='review'?'开始重新审查 unit ':'开始生成 unit ')+unitId+'。',activePhase);pollJob()}catch(e){log('unit '+unitId+' 无法开始：'+e.message,activePhase);loadState()}}
@@ -161,6 +161,8 @@ def _validate_ui_selection(stack_profile, platforms):
 
 
 def unit_dir(unit_id):
+    if not isinstance(unit_id, str) or not check_workspace.UNIT_ID_RE.match(unit_id):
+        raise ValueError("unit id 无效：%r（只能用小写字母、数字和连字符）" % unit_id)
     return "src/ui/units/%s" % unit_id
 
 
@@ -501,6 +503,11 @@ def init_workspace(path, official, one_liner, source_path=None, capabilities=Non
         if agents:
             ui["agents"] = agents
         _write_json(ui_path, ui)
+    elif agents:
+        # Re-initializing keeps the existing UI config but must not silently drop newly chosen agents.
+        ui = _read_json(ui_path)
+        ui["agents"] = agents
+        _write_json(ui_path, ui)
     manifest_path = path / "src/ui/ir/manifest.json"
     if not manifest_path.exists():
         _write_json(manifest_path, _manifest_payload(stack_profile, selected_platforms))
@@ -567,7 +574,7 @@ def _claude_result(output_path):
             data = json.loads(line)
         except ValueError:
             continue
-        if isinstance(data, dict):
+        if isinstance(data, dict) and data.get("type") == "result":
             if data.get("is_error"):
                 raise RuntimeError("Claude Code 报错：%s" % (data.get("result") or data.get("subtype") or "未知错误"))
             return data
@@ -884,18 +891,24 @@ VERDICT_SCHEMA = ROOT / "assets/unit-review-verdict.schema.json"
 
 
 def _codex_config_value(key):
-    """A top-level string setting from codex's own config (before any [table]), or None."""
+    """A top-level string setting from codex's own config (before any [table]), or None.
+
+    With a profile active the value may come from that profile instead, so nothing is claimed.
+    """
     try:
         text = CODEX_CONFIG.read_text(encoding="utf-8")
     except OSError:
         return None
+    values = {}
     for line in text.splitlines():
         if line.lstrip().startswith("["):
             break
-        match = re.match(r'\s*%s\s*=\s*"([^"]*)"' % re.escape(key), line)
+        match = re.match(r"""\s*([A-Za-z_][\w-]*)\s*=\s*(?:"([^"]*)"|'([^']*)')""", line)
         if match:
-            return match.group(1)
-    return None
+            values[match.group(1)] = match.group(2) if match.group(2) is not None else match.group(3)
+    if "profile" in values:
+        return None
+    return values.get(key)
 
 
 def _agent_setting(path, role):
@@ -922,6 +935,12 @@ def _agent_command(path, setting, prompt, unit_id=None, verdict_path=None):
     # Claude Code has no OS sandbox: dontAsk denies every tool not listed, and only the unit's own directory is writable.
     tools = ["Read", "Glob", "Grep"]
     if not review:
+        unsafe = sorted(set(str(path)) & set("*?[]{}()"))
+        if unsafe:
+            raise ValueError(
+                "工作区路径含有 %s，Claude Code 的权限规则会把它当作匹配符号，无法精确限定到 unit 目录；"
+                "请换用不含这些字符的路径，或把生成引擎改为 codex" % " ".join(unsafe)
+            )
         own = path / unit_dir(unit_id)
         tools += ["Write(/%s/**)" % own, "Edit(/%s/**)" % own]
     cmd = ["claude", "-p", "--output-format", "json", "--permission-mode", "dontAsk", "--allowedTools"] + tools
@@ -951,8 +970,10 @@ def _agent_identity(setting, claude_data=None):
     """Engine, model and effort actually used: Claude Code reports its model; codex falls back to its config."""
     engine = setting["engine"]
     if engine == "claude":
-        used = list((claude_data or {}).get("modelUsage") or {})
-        model, effort = (used[0] if used else setting.get("model")), setting.get("reasoningEffort")
+        # modelUsage can also list a small helper model; the one that wrote the most output did the work.
+        usage = (claude_data or {}).get("modelUsage") or {}
+        main = max(usage, key=lambda name: (usage[name] or {}).get("outputTokens", 0), default=None)
+        model, effort = main or setting.get("model"), setting.get("reasoningEffort")
     else:
         model = setting.get("model") or _codex_config_value("model")
         effort = setting.get("reasoningEffort") or _codex_config_value("model_reasoning_effort")

@@ -76,7 +76,7 @@
 - `model`：模型名，留空则跟随该引擎自己的默认配置（codex 读 `~/.codex/config.toml`，Claude Code 读它自己的设置）。只允许字母、数字和 `. _ : / [ ] -`，且不能以 `-` 开头。
 - `reasoningEffort`：推理强度，留空跟随引擎默认。codex 可选 `low`、`medium`、`high`；Claude Code 可选 `low`、`medium`、`high`、`xhigh`、`max`。
 
-创建工作区时在页面上选填，之后可以直接编辑 `config/ui.json`。整阶段生成任务（各阶段的“生成”按钮）不受这项设置影响，始终用 codex 默认配置。推荐生成用 codex、审查用 Claude Code：换一家的模型来审，最能发现生成模型自己的盲区。
+创建工作区时在页面上选填，之后可以直接编辑 `config/ui.json`；对已有工作区再次初始化并传入 `agents` 时，会写进现有的 `config/ui.json`。整阶段生成任务（各阶段的“生成”按钮）不受这项设置影响，始终用 codex 默认配置。推荐生成用 codex、审查用 Claude Code：换一家的模型来审，最能发现生成模型自己的盲区。
 
 两种引擎都被限制在同样的范围内：
 
@@ -85,7 +85,7 @@
 | 生成 | `codex exec -s workspace-write`：系统沙箱只允许写工作区 | `claude -p --permission-mode dontAsk`，只放开 Read、Glob、Grep，以及对该 unit 目录的 Write、Edit；其他写入和 Bash 都被拒绝 |
 | 审查 | `codex exec -s read-only`，`--output-schema` 约束结论，`-o` 写入 `review.json` | 同样的权限但不放开 Write、Edit，`--json-schema` 约束结论，工作台把返回的 `structured_output` 写入 `review.json` |
 
-两者事后都再经过下面的越界核对。Claude Code 即使出错也可能以退出码 0 结束，所以工作台读取它输出里的 `is_error` 判断成败。每条审查记录的 `reviewer` 写明 `engine`、实际用的 `model`（Claude Code 取自它返回的用量信息；codex 取设置值，没设时取 `~/.codex/config.toml` 的默认值）和 `reasoningEffort`；unit 的 `metadata.json` 记录生成它的引擎与模型。
+Claude Code 的权限规则会把路径里的 `* ? [ ] { } ( )` 当作匹配符号，所以工作区路径含这些字符时拒绝用 Claude Code 生成；unit id 只能用小写字母、数字和连字符，因为它同时决定 unit 目录和这条写权限。两者事后都再经过下面的越界核对。Claude Code 即使出错也可能以退出码 0 结束，所以工作台读取它输出里的 `is_error` 判断成败。每条审查记录的 `reviewer` 写明 `engine`、实际用的 `model`（Claude Code 取自它返回的用量信息；codex 取设置值，没设时取 `~/.codex/config.toml` 的默认值）和 `reasoningEffort`；unit 的 `metadata.json` 记录生成它的引擎与模型。
 
 自动审查由工作台另起一个只读的审查进程，按 `assets/unit-review-verdict.schema.json` 输出结论并写入 `src/ui/units/<unitId>/review.json`；它与生成进程是两个独立进程，不复用生成时的上下文。生成 unit 时使用只针对该 unit 的 prompt，进程只能写工作区：生成与审查都不加 `--add-dir`，因为加进去的目录会变成可写，技能目录的参考文档只按绝对路径读取。重新生成时，prompt 带上该 unit 最近一条“要求修改”审查的全部证据和状态备注，生成进程据此逐条修改，而不是重复上一次的输出。进程结束后（包括失败和超时），工作台先核对 `brand.brief.json`、`project/`、`config/`、`tokens/`、`src/ui/ir/` 与其他 unit 目录有没有被改动，有就恢复原样，再报告结果；恢复本身出错时，错误信息会写明这些文件可能仍被改动。超时会结束 codex 及其启动的全部子进程后才开始核对。
 

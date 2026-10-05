@@ -330,7 +330,7 @@ class UiWorkbenchTest(unittest.TestCase):
                     if claude:
                         structured = None if isinstance(verdict, str) else verdict
                         Path(output_path).write_text(json.dumps({
-                            "is_error": False, "result": text, "structured_output": structured,
+                            "type": "result", "is_error": False, "result": text, "structured_output": structured,
                             "modelUsage": {"claude-sonnet-5-5": {}},
                         }), encoding="utf-8")
                     else:
@@ -342,7 +342,7 @@ class UiWorkbenchTest(unittest.TestCase):
                 (Path(cwd) / stray[0]).write_text(stray[1], encoding="utf-8")
             if claude:
                 Path(output_path).write_text(json.dumps({
-                    "is_error": claude_error is not None, "result": claude_error or "done",
+                    "type": "result", "is_error": claude_error is not None, "result": claude_error or "done",
                     "modelUsage": {"claude-sonnet-5-5": {}},
                 }), encoding="utf-8")
             return 0
@@ -395,6 +395,43 @@ class UiWorkbenchTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as root:
             self.init(root, agents={"generation": {"engine": "codex", "model": "", "reasoningEffort": ""}})
             self.assertNotIn("agents", self.read(root, "config/ui.json"))
+
+    def test_agent_settings_merge_into_an_existing_workspace(self):
+        with tempfile.TemporaryDirectory() as root:
+            workspace = self.init(root)
+            agents = {"review": {"engine": "claude", "reasoningEffort": "high"}}
+            workbench.init_workspace(workspace, "Tidewell", "Manage feedback", agents=agents)
+            self.assertEqual(self.read(root, "config/ui.json")["agents"], agents)
+
+    def test_claude_permissions_refuse_unsafe_paths_and_unit_ids(self):
+        with tempfile.TemporaryDirectory() as root:
+            workspace = Path(root) / "Brand [v2] *x"
+            workbench.init_workspace(workspace, "Tidewell", "x", agents={"generation": {"engine": "claude"}})
+            with self.assertRaisesRegex(ValueError, "Claude Code"):
+                workbench._agent_command(workspace, {"engine": "claude"}, "prompt", unit_id="page-map")
+            workbench._agent_command(workspace, {"engine": "codex"}, "prompt", unit_id="page-map")
+        for unit_id in ("../../..", "Page Map", ""):
+            with self.subTest(unit_id=unit_id), self.assertRaisesRegex(ValueError, "unit id"):
+                workbench.unit_dir(unit_id)
+
+    def test_claude_result_ignores_other_json_lines_and_picks_the_main_model(self):
+        with tempfile.TemporaryDirectory() as root:
+            output = Path(root) / "out.json"
+            output.write_text('{"type": "result", "is_error": false, "modelUsage": {"claude-haiku-4-5": {"outputTokens": 40}, "claude-sonnet-5-5": {"outputTokens": 900}}}\n{"warning": "x"}\n', encoding="utf-8")
+            data = workbench._claude_result(output)
+            self.assertEqual(workbench._agent_identity({"engine": "claude"}, data)["model"], "claude-sonnet-5-5")
+            output.write_text('{"warning": "only a warning"}\n', encoding="utf-8")
+            with self.assertRaisesRegex(RuntimeError, "没有给出可读的结果"):
+                workbench._claude_result(output)
+
+    def test_codex_default_is_not_guessed_when_a_profile_is_active(self):
+        with tempfile.TemporaryDirectory() as root:
+            config = Path(root) / "config.toml"
+            config.write_text("model = 'gpt-single'\n", encoding="utf-8")
+            with mock.patch.object(workbench, "CODEX_CONFIG", config):
+                self.assertEqual(workbench._codex_config_value("model"), "gpt-single")
+                config.write_text('profile = "fast"\nmodel = "gpt-base"\n', encoding="utf-8")
+                self.assertIsNone(workbench._codex_config_value("model"))
 
     def test_claude_generation_and_review_stay_inside_their_permissions(self):
         with tempfile.TemporaryDirectory() as root:

@@ -38,6 +38,8 @@ UNIT_KINDS = ("page-map", "layout", "reuse-analysis", "component", "page", "plat
 UNIT_STATUSES = ("not-started", "in-progress", "in-review", "approved", "changes-requested")
 REVIEW_CONCLUSIONS = ("approved", "changes-requested")
 SHA256_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
+# A unit id names its directory and Claude Code's write permission, so it must not carry path or glob syntax.
+UNIT_ID_RE = re.compile(r"^[a-z0-9][a-z0-9-]*$")
 AGENT_ROLES = ("generation", "review")
 # Reasoning effort values each engine's CLI accepts (codex: model_reasoning_effort; Claude Code: --effort).
 AGENT_EFFORTS = {"codex": ("low", "medium", "high"), "claude": ("low", "medium", "high", "xhigh", "max")}
@@ -260,6 +262,8 @@ def check_manifest(manifest, ws, problems):
         unit_id = unit.get("id")
         if not present(unit, "id"):
             problems.append("%s.id must be a non-empty string" % label)
+        elif not UNIT_ID_RE.match(unit_id):
+            problems.append("%s.id must use lowercase letters, digits and hyphens" % label)
         elif unit_id in by_id:
             problems.append("duplicate unit id %s" % unit_id)
         else:
