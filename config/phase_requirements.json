@@ -54,7 +54,11 @@
       "required": [
         "review/03-system.html",
         "docs/accessibility.md",
-        "config/quality.json"
+        "config/quality.json",
+        "tokens/src/primitives/color.json",
+        "tokens/src/primitives/typography.json",
+        "tokens/src/primitives/spacing.json",
+        "tokens/src/primitives/radius.json"
       ],
       "requiresApprovals": ["G1", "G2"],
       "review": "review/03-system.html"

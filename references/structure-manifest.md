@@ -38,6 +38,10 @@ brand-workspace/
 ├── tokens/                          [3]
 │   ├── src/
 │   │   ├── primitives/
+│   │   │   ├── color.json           [3]
+│   │   │   ├── typography.json      [3]
+│   │   │   ├── spacing.json         [3]
+│   │   │   └── radius.json          [3]
 │   │   ├── semantic/
 │   │   └── components/
 │   └── schema/
