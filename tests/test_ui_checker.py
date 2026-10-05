@@ -147,13 +147,13 @@ class UiCheckerTest(unittest.TestCase):
         findings = self.findings(status=status, approvals=[self.approved_review("map")])
         self.assert_finding(findings, "unit layout: in-review requires output")
 
-    def test_completed_cannot_skip_approved_review_and_changes_request_blocks(self):
+    def test_approved_cannot_skip_approved_review_and_changes_request_blocks(self):
         status = {"phase": 4, "blockers": [], "units": [
-            {"unitId": "map", "status": "completed"},
+            {"unitId": "map", "status": "approved"},
             {"unitId": "layout", "status": "in-progress"},
         ]}
         findings = self.findings(status=status, approvals=[self.approved_review("map", conclusion="changes-requested")])
-        self.assert_finding(findings, "completed requires an approved unit-review")
+        self.assert_finding(findings, "approved requires an approved unit-review")
         status["units"][0]["status"] = "changes-requested"
         findings = self.findings(status=status)
         self.assert_finding(findings, "changes-requested blocks phase progression")
@@ -194,6 +194,12 @@ class UiCheckerTest(unittest.TestCase):
         findings = self.findings(approvals=[review])
         self.assert_finding(findings, "outputHash is invalid")
         self.assert_finding(findings, "reviewer must be a named subagent")
+
+    def test_manifest_must_cover_every_unit_kind_and_completed_is_gone(self):
+        findings = self.findings()
+        self.assert_finding(findings, "manifest is missing unit kind reuse-analysis")
+        status = {"phase": 4, "blockers": [], "units": [{"unitId": "map", "status": "completed"}]}
+        self.assert_finding(self.findings(status=status), "unit map has invalid status")
 
     def test_unit_review_status_must_equal_conclusion_and_summary_must_be_text(self):
         review = self.approved_review("map", conclusion="changes-requested")

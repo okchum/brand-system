@@ -41,7 +41,7 @@
       "enum": ["page-map", "layout", "reuse-analysis", "component", "page", "platform-adaptation"]
     },
     "unitStatus": {
-      "enum": ["not-started", "in-progress", "in-review", "approved", "changes-requested", "completed"]
+      "enum": ["not-started", "in-progress", "in-review", "approved", "changes-requested"]
     },
     "approvalStatus": {
       "enum": ["pending", "approved", "changes-requested"]
@@ -58,11 +58,10 @@
     },
     "manifestUnit": {
       "type": "object",
-      "required": ["id", "kind", "status", "files", "platforms"],
+      "required": ["id", "kind", "files", "platforms"],
       "properties": {
         "id": { "type": "string", "minLength": 1 },
         "kind": { "$ref": "#/$defs/unitKind" },
-        "status": { "$ref": "#/$defs/unitStatus" },
         "files": {
           "type": "array",
           "items": { "type": "string", "minLength": 1 },

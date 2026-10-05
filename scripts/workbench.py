@@ -118,7 +118,8 @@ UI_UNIT_DEPENDENCIES = {
 }
 UI_UNIT_PHASE = 4
 UNIT_REVIEWER = {"type": "subagent", "name": "codex-unit-reviewer"}
-# ponytail: one process-wide lock for every status/manifest/approvals read-modify-write; per-workspace locks if contention shows up.
+# ponytail: one lock for every state read-modify-write, shared by all workspaces and held across the advance
+# checker run; it only guards writers inside this workbench process. Per-workspace locks if contention shows up.
 STATE_LOCK = threading.RLock()
 
 
@@ -166,7 +167,6 @@ def _manifest_payload(stack_profile, platforms):
             {
                 "id": kind,
                 "kind": kind,
-                "status": "not-started",
                 "files": [unit_output_path(kind)],
                 "platforms": list(platforms),
                 "dependsOn": list(UI_UNIT_DEPENDENCIES[kind]),
@@ -208,16 +208,12 @@ def _unit_states(workspace):
 
 
 def set_unit_status(workspace, unit_id, status, note=None):
-    """Write the unit status to status.json (the progress authority) and mirror it into the manifest."""
+    """Write the unit status to status.json, the only record of progress; the manifest holds design content."""
     if status not in check_workspace.UNIT_STATUSES:
         raise ValueError("未知 UI unit status")
     workspace = Path(workspace).expanduser().resolve()
     with STATE_LOCK:
-        manifest_path = workspace / "src/ui/ir/manifest.json"
-        manifest = _read_json(manifest_path)
-        unit = _unit_record(manifest, unit_id)
-        unit["status"] = status
-        _write_json(manifest_path, manifest)
+        unit = _unit_record(_read_json(workspace / "src/ui/ir/manifest.json"), unit_id)
         status_path = workspace / "project/status.json"
         state = _read_json(status_path)
         units = state.setdefault("units", [])
@@ -231,7 +227,6 @@ def set_unit_status(workspace, unit_id, status, note=None):
             record["note"] = note
         record["updatedAt"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
         _write_json(status_path, state)
-        sync_manifest_hash(workspace)
         return unit
 
 
@@ -393,8 +388,8 @@ def unit_overview(workspace):
             "note": notes.get(unit["id"]) or "",
             "dependsOn": unit.get("dependsOn", []),
             "blockedBy": blocked_by,
-            "output": unit_output_path(unit["id"]),
-            "outputExists": (workspace / unit_output_path(unit["id"])).is_file(),
+            "output": unit["files"][0],
+            "outputExists": check_workspace.output_exists(workspace, unit),
             "review": None if review is None else {
                 "conclusion": review.get("conclusion"),
                 "reviewer": (review.get("reviewer") or {}).get("name"),
@@ -651,6 +646,9 @@ def _require_unit_phase(path, phase):
     if phase != UI_UNIT_PHASE or int(status.get("phase", -1)) != UI_UNIT_PHASE:
         raise ValueError("UI unit 只能在 Phase 4（设计系统 G3 批准之后）生成和审查")
     _require_gates(path, UI_UNIT_PHASE)
+    tokens = path / "tokens/src"
+    if not tokens.is_dir() or not any(item.is_file() for item in tokens.rglob("*")):
+        raise ValueError("缺少 tokens/src：UI unit 只能引用设计 token，先完成 Phase 3 的 tokens")
 
 
 def _phase_prompt(phase, choice):
@@ -701,7 +699,7 @@ def _unit_feedback(path, unit_id):
     lines = []
     review = check_workspace.latest_unit_reviews(_read_json(path / "project/approvals.json", [])).get(unit_id)
     if review and review.get("conclusion") == "changes-requested":
-        lines.append("上次审查要求修改，逐条处理：" + "；".join(review.get("evidence", [])))
+        lines.append("最近一次审查（针对上一版输出）要求修改，逐条处理后重写，仍存在的问题都要解决：" + "；".join(review.get("evidence", [])))
     units = _read_json(path / "project/status.json").get("units", [])
     note = next((item.get("note") for item in units if isinstance(item, dict) and item.get("unitId") == unit_id), "")
     if note:
@@ -711,12 +709,13 @@ def _unit_feedback(path, unit_id):
 
 def _unit_prompt(path, unit, choice):
     ui = _read_json(path / "config/ui.json", {})
-    inputs = "、".join(unit_output_path(dep) for dep in unit.get("dependsOn", [])) or "无"
-    return f"""只完成 UI unit「{unit['id']}」（类型 {unit.get('kind')}），把页面写到 {unit_output_path(unit['id'])}。只写入 {unit_dir(unit['id'])}/ 目录；不要修改 project/、config/、src/ui/ir/、tokens/ 以及其他 unit 的目录。读取 src/ui/ir/manifest.json、config/ui.json、brand.brief.json、tokens/src/，以及依赖 unit 的输出：{inputs}。按 {ROOT / "references/ui.md"} 中该类型的要求完成（该文件只读）；颜色、字号、间距只引用 tokens/src 的 token，不复制数值。目标平台：{'、'.join(ui.get('platforms', []))}；技术栈：{ui.get('stackProfile', '')}；Desktop 与 Mobile 以 Web preview 呈现，同时写清平台语义，方便转换为 native 代码。品牌方向为 Direction {choice}。{_unit_feedback(path, unit['id'])}不要只解释，直接创建文件。"""
+    units = {item["id"]: item for item in _read_json(path / "src/ui/ir/manifest.json").get("units", [])}
+    inputs = "、".join(file for dep in unit.get("dependsOn", []) for file in units.get(dep, {}).get("files", [])) or "无"
+    return f"""只完成 UI unit「{unit['id']}」（类型 {unit.get('kind')}），把页面写到 {'、'.join(unit['files'])}。只写入 {unit_dir(unit['id'])}/ 目录；不要修改 project/、config/、src/ui/ir/、tokens/ 以及其他 unit 的目录。读取 src/ui/ir/manifest.json、config/ui.json、brand.brief.json、tokens/src/，以及依赖 unit 的输出：{inputs}。按 {ROOT / "references/ui.md"} 中该类型的要求完成（该文件只读）；颜色、字号、间距只引用 tokens/src 的 token，不复制数值。目标平台：{'、'.join(ui.get('platforms', []))}；技术栈：{ui.get('stackProfile', '')}；Desktop 与 Mobile 以 Web preview 呈现，同时写清平台语义，方便转换为 native 代码。品牌方向为 Direction {choice}。{_unit_feedback(path, unit['id'])}不要只解释，直接创建文件。"""
 
 
 def _review_prompt(unit):
-    return f"""你是独立审查者，只读不写。审查 UI unit「{unit['id']}」（类型 {unit.get('kind')}）的输出 {unit_output_path(unit['id'])}。对照 {ROOT / "references/ui.md"}、{ROOT / "references/accessibility.md"}、src/ui/ir/manifest.json 中该 unit 的 platforms 与 dependsOn、tokens/src/，以及依赖 unit 的输出。检查：是否满足该类型的职责，组件是否复用而不是重复造，状态（hover、focus-visible、disabled、loading、invalid、空、错误）是否齐全，颜色与间距是否只引用 token，平台语义是否写清，可访问性。每个问题给出严重度 P0–P3、位置和具体问题。只有没有 P0/P1 时结论才是 approved，否则是 changes-requested。"""
+    return f"""你是独立审查者，只读不写。审查 UI unit「{unit['id']}」（类型 {unit.get('kind')}）的输出 {'、'.join(unit['files'])}。对照 {ROOT / "references/ui.md"}、{ROOT / "references/accessibility.md"}、src/ui/ir/manifest.json 中该 unit 的 platforms 与 dependsOn、tokens/src/，以及依赖 unit 的输出。检查：是否满足该类型的职责，组件是否复用而不是重复造，状态（hover、focus-visible、disabled、loading、invalid、空、错误）是否齐全，颜色与间距是否只引用 token，平台语义是否写清，可访问性。每个问题给出严重度 P0–P3、位置和具体问题。只有没有 P0/P1 时结论才是 approved，否则是 changes-requested。"""
 
 
 # Paths a unit job may not change outside its own unit directory.
@@ -775,14 +774,16 @@ def _review_unit(job_id, path, unit_id):
         or any(not isinstance(item, dict) or item.get("severity") not in ("P0", "P1", "P2", "P3") for item in findings)
     ):
         raise ValueError("审查结论不符合 assets/unit-review-verdict.schema.json")
-    output = path / unit_output_path(unit_id)
     with STATE_LOCK:
         if check_workspace.unit_output_hash(path, unit) != digest:
             raise ValueError("审查期间输出被改动，这次结论作废")
         evidence = [str(verdict_path.relative_to(path)), verdict["summary"].strip()] + [
             "%s %s：%s" % (item["severity"], item.get("location", ""), item.get("problem", "")) for item in findings
         ]
-        scope = [{"path": unit_output_path(unit_id), "startLine": 1, "endLine": max(1, len(output.read_text(encoding="utf-8").splitlines()))}]
+        scope = [
+            {"path": rel, "startLine": 1, "endLine": max(1, len((path / rel).read_text(encoding="utf-8").splitlines()))}
+            for rel in unit["files"]
+        ]
         record = append_unit_review(path, unit_id, verdict["conclusion"], UNIT_REVIEWER, evidence, scope, digest, verdict["summary"])
     _job_log(job_id, "审查结论：%s · %s" % (verdict["conclusion"], verdict["summary"].strip()))
     return record
@@ -813,12 +814,11 @@ def start_unit_job(path, phase, unit_id):
     with STATE_LOCK:
         job_id = _create_job(path, prompt, unit_id)
         try:
-            # Snapshot first: if it fails nothing has changed yet. begin_unit_generation then rewrites the
-            # state files itself, and those writes must count as "before" or the restore would undo them.
+            # Snapshot first: if it fails nothing has changed yet. begin_unit_generation then rewrites
+            # status.json itself, and that write must count as "before" or the restore would undo it.
             before = _protected_snapshot(path, unit_id)
             begin_unit_generation(path, unit_id)
-            for rel in ("project/status.json", "src/ui/ir/manifest.json"):
-                before[rel] = (path / rel).read_bytes()
+            before["project/status.json"] = (path / "project/status.json").read_bytes()
         except Exception:
             with JOBS_LOCK:
                 JOBS.pop(job_id, None)

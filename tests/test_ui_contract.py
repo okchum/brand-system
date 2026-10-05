@@ -71,11 +71,11 @@ class UiContractTest(unittest.TestCase):
         )
         self.assertEqual(
             self.defs["unitStatus"]["enum"],
-            ["not-started", "in-progress", "in-review", "approved", "changes-requested", "completed"],
+            ["not-started", "in-progress", "in-review", "approved", "changes-requested"],
         )
         self.assertEqual(
             set(self.defs["manifestUnit"]["required"]),
-            {"id", "kind", "status", "files", "platforms"},
+            {"id", "kind", "files", "platforms"},
         )
 
     def test_status_units_and_approval_records_are_bound(self):

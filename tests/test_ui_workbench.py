@@ -83,6 +83,9 @@ class UiWorkbenchTest(unittest.TestCase):
         (workspace / "project/approvals.json").write_text(
             json.dumps([gate("G1"), gate("G2"), gate("G3")]), encoding="utf-8"
         )
+        tokens = workspace / "tokens/src/color.json"
+        tokens.parent.mkdir(parents=True, exist_ok=True)
+        tokens.write_text('{"color": {"primary": {"value": "#123456"}}}', encoding="utf-8")
         return workspace
 
     def test_init_creates_ui_contract_files_and_units_without_overwriting_existing_files(self):
@@ -101,7 +104,7 @@ class UiWorkbenchTest(unittest.TestCase):
                 [unit["kind"] for unit in manifest["units"]],
                 ["page-map", "layout", "reuse-analysis", "component", "page", "platform-adaptation"],
             )
-            self.assertEqual([unit["status"] for unit in manifest["units"]], ["not-started"] * 6)
+            self.assertFalse([unit for unit in manifest["units"] if "status" in unit], "progress lives in status.json only")
             self.assertEqual([unit["status"] for unit in status["units"]], ["not-started"] * 6)
             self.assertEqual(
                 [unit["unitId"] for unit in status["units"]],
@@ -228,12 +231,14 @@ class UiWorkbenchTest(unittest.TestCase):
             self.assertEqual(first["manifestHash"], self.read(root, "src/ui/ir/manifest.json")["hash"])
             workbench.begin_unit_generation(workspace, "component")
 
-    def test_completed_dependency_unblocks_downstream_generation(self):
+    def test_unit_generation_requires_design_tokens(self):
         with tempfile.TemporaryDirectory() as root:
-            workspace = self.init(root)
-            self.review(workspace, "page-map")
-            workbench.set_unit_status(workspace, "page-map", "completed")
-            workbench.begin_unit_generation(workspace, "layout")
+            workspace = self.phase_four(root)
+            for item in (workspace / "tokens/src").iterdir():
+                item.unlink()
+            with self.assertRaisesRegex(ValueError, "tokens/src"):
+                workbench.start_unit_job(workspace, 4, "page-map")
+            self.assertEqual(self.unit_status(workspace, "page-map")["status"], "not-started")
 
     def test_generation_follows_manifest_depends_on(self):
         with tempfile.TemporaryDirectory() as root:

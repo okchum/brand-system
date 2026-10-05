@@ -35,8 +35,7 @@ UI_PLATFORMS = ("web", "desktop", "ios", "android")
 STACK_PROFILES = ("html-css-js", "react")
 DELIVERY_STATUSES = ("preview-only", "handoff-ready")
 UNIT_KINDS = ("page-map", "layout", "reuse-analysis", "component", "page", "platform-adaptation")
-UNIT_STATUSES = ("not-started", "in-progress", "in-review", "approved", "changes-requested", "completed")
-DONE_UNIT_STATUSES = ("approved", "completed")
+UNIT_STATUSES = ("not-started", "in-progress", "in-review", "approved", "changes-requested")
 REVIEW_CONCLUSIONS = ("approved", "changes-requested")
 SHA256_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 ROOT = Path(__file__).resolve().parents[1]
@@ -233,8 +232,6 @@ def check_manifest(manifest, ws, problems):
             by_id[unit_id] = unit
         if unit.get("kind") not in UNIT_KINDS:
             problems.append("%s.kind is invalid" % label)
-        if unit.get("status") not in UNIT_STATUSES:
-            problems.append("%s.status is invalid" % label)
         files = unit.get("files")
         if not isinstance(files, list) or not files or any(not isinstance(path, str) or not path.strip() for path in files) or len(files) != len(set(files or [])):
             problems.append("%s.files must be a non-empty unique string array" % label)
@@ -255,6 +252,11 @@ def check_manifest(manifest, ws, problems):
             elif dep not in by_id and not any(isinstance(item, dict) and item.get("id") == dep for item in units):
                 problems.append("unit %s dependsOn missing unit %s" % (unit_id, dep))
         check_token_values(unit, "manifest unit %s" % unit_id, problems)
+    # Every step of the fixed order must exist, or an older manifest silently skips one (e.g. reuse-analysis).
+    kinds = {unit.get("kind") for unit in units if isinstance(unit, dict)}
+    for kind in UNIT_KINDS:
+        if kind not in kinds:
+            problems.append("src/ui/ir/manifest.json: manifest is missing unit kind %s" % kind)
     visiting = set()
     visited = set()
 
@@ -380,7 +382,7 @@ def unsatisfied_dependencies(ws, manifest, status_by_id, latest_reviews, unit):
     units = {item.get("id"): item for item in manifest.get("units", []) if isinstance(item, dict)}
     missing = []
     for dep in unit.get("dependsOn", []) if isinstance(unit, dict) else []:
-        if status_by_id.get(dep, "not-started") not in DONE_UNIT_STATUSES or dep not in units or not review_current(
+        if status_by_id.get(dep, "not-started") != "approved" or dep not in units or not review_current(
             ws, latest_reviews.get(dep), manifest, units[dep]
         ):
             missing.append(dep)
@@ -486,7 +488,7 @@ def check_units(ws, phase, status, manifest, latest_reviews, problems):
         if state == "in-review" and not output_exists(ws, unit):
             problems.append("unit %s: in-review requires output" % unit_id)
         review = latest_reviews.get(unit_id)
-        if state in DONE_UNIT_STATUSES and not review_current(ws, review, manifest, unit):
+        if state == "approved" and not review_current(ws, review, manifest, unit):
             problems.append("unit %s: %s requires an approved unit-review matching the latest manifest and output" % (unit_id, state))
         if unit_id not in latest_reviews:
             problems.append("unit %s requires unit-review" % unit_id)

@@ -29,7 +29,7 @@
 - `tokenSource`：固定为 `tokens/src`；UI 配置不得复制 token 值。
 - `deliveryStatus`：只能是 `preview-only` 或 `handoff-ready`。没有可验证工具链时不得声称 native runtime 已实现。
 
-`src/ui/ir/manifest.json` 是页面和组件工作单元的唯一清单，必须包含 `manifestVersion`、`hash` 和 `units`。每个 unit 必须包含 `id`、`kind`、`status`、`files`、`platforms`；`kind` 只能使用 `page-map`、`layout`、`reuse-analysis`、`component`、`page`、`platform-adaptation`。`status` 只能是 `not-started`、`in-progress`、`in-review`、`approved`、`changes-requested`、`completed`。
+`src/ui/ir/manifest.json` 是页面和组件工作单元的唯一清单，必须包含 `manifestVersion`、`hash` 和 `units`。每个 unit 必须包含 `id`、`kind`、`files`、`platforms`；`kind` 只能使用 `page-map`、`layout`、`reuse-analysis`、`component`、`page`、`platform-adaptation`，而且六种都必须出现。manifest 只描述设计内容，不记录进度。
 
 工作顺序固定为：页面地图 → 布局 → 复用分析 → 组件 → 页面 → 平台适配。复用分析是独立的 unit，组件 unit 依赖它，所以组件必须按复用结论来做，不能边做边临时决定。每个 unit 都必须启动独立 subagent review；审阅记录写入 `project/approvals.json` 的 `kind=unit-review`，不能用一次总评替代逐单元记录。
 
@@ -53,14 +53,14 @@
 
 #### unit 推进规则
 
-进度只认 `project/status.json` 的 `units`；manifest 里的 `status` 由同一次写入同步，不作为判断依据。
+进度只记在 `project/status.json` 的 `units` 里，状态只能是 `not-started`、`in-progress`、`in-review`、`approved`、`changes-requested`。
 
-依赖满足：依赖 unit 处于 `approved` 或 `completed`，且它最新一条 unit-review 结论为 `approved`、绑定当前 manifest 的版本与 hash、`outputHash` 等于输出文件当前内容的 sha256。工作台生成与 checker 调用同一个判断函数。
+依赖满足：依赖 unit 处于 `approved`，且它最新一条 unit-review 结论为 `approved`、绑定当前 manifest 的版本与 hash、`outputHash` 等于输出文件当前内容的 sha256。工作台生成与 checker 调用同一个判断函数。
 
 | 动作 | 允许的起始状态 | 前提 | 结果 |
 |---|---|---|---|
 | 初始化 | — | — | 全部 unit 为 `not-started` |
-| 生成 unit（页面按钮或 `POST /api/generate` 带 `unitId`） | 任意 | 当前阶段为 Phase 4；G1–G3 最新记录为 approved；所有依赖满足；该工作区没有正在运行的任务 | unit 变为 `in-progress`；所有直接或间接依赖它、且不是 `not-started` 的下游 unit 变为 `changes-requested`，因为它们基于旧的上游产出 |
+| 生成 unit（页面按钮或 `POST /api/generate` 带 `unitId`） | 任意 | 当前阶段为 Phase 4；G1–G3 最新记录为 approved；`tokens/src` 里已有 token 文件；所有依赖满足；该工作区没有正在运行的任务 | unit 变为 `in-progress`；所有直接或间接依赖它、且不是 `not-started` 的下游 unit 变为 `changes-requested`，因为它们基于旧的上游产出 |
 | 生成成功 | `in-progress` | 生成进程只改动了该 unit 自己的目录 | `in-review`，随即自动启动审查 |
 | 生成失败、超时，或改动了该 unit 目录以外的文件 | `in-progress` | — | 越界改动的文件恢复原样；unit 保持 `in-progress`，`note` 写明原因 |
 | 自动审查完成 | `in-review` | 审查期间状态与输出内容都没有变化 | 追加 unit-review；unit 变为 `approved` 或 `changes-requested` |
