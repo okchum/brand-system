@@ -41,7 +41,7 @@
       "enum": ["page-map", "layout", "component", "page", "platform-adaptation"]
     },
     "unitStatus": {
-      "enum": ["in-progress", "in-review", "approved", "changes-requested", "completed"]
+      "enum": ["not-started", "in-progress", "in-review", "approved", "changes-requested", "completed"]
     },
     "approvalStatus": {
       "enum": ["pending", "approved", "changes-requested"]
@@ -150,6 +150,7 @@
         "unitId",
         "manifestVersion",
         "manifestHash",
+        "outputHash",
         "fileScope",
         "reviewer",
         "conclusion",
@@ -157,10 +158,12 @@
       ],
       "properties": {
         "kind": { "const": "unit-review" },
-        "status": { "$ref": "#/$defs/unitStatus" },
+        "status": { "enum": ["approved", "changes-requested"] },
         "unitId": { "type": "string", "minLength": 1 },
         "manifestVersion": { "type": "string", "minLength": 1 },
         "manifestHash": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+        "outputHash": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+        "reviewedAt": { "type": "string", "minLength": 1 },
         "fileScope": {
           "type": "array",
           "items": { "$ref": "#/$defs/fileRange" },

@@ -13,6 +13,7 @@ earlier approval. Unit reviews are likewise checked against the latest UI
 manifest. The checker validates presence and shape only; it cannot judge
 design quality or whether an approval was real.
 """
+import hashlib
 import json
 import os
 import re
@@ -34,7 +35,9 @@ UI_PLATFORMS = ("web", "desktop", "ios", "android")
 STACK_PROFILES = ("html-css-js", "react")
 DELIVERY_STATUSES = ("preview-only", "handoff-ready")
 UNIT_KINDS = ("page-map", "layout", "component", "page", "platform-adaptation")
-UNIT_STATUSES = ("in-progress", "in-review", "approved", "changes-requested", "completed")
+UNIT_STATUSES = ("not-started", "in-progress", "in-review", "approved", "changes-requested", "completed")
+DONE_UNIT_STATUSES = ("approved", "completed")
+REVIEW_CONCLUSIONS = ("approved", "changes-requested")
 MANIFEST_HASH_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -314,31 +317,68 @@ def valid_file_scope(value):
     return True
 
 
-def check_unit_review(record, index, latest_reviews, problems):
+def check_unit_review(record, index, problems):
     unit_id = record.get("unitId")
     if not present(record, "unitId"):
         problems.append("approval #%d (unit-review): unitId is required" % index)
-    if record.get("status") not in UNIT_STATUSES:
+    if record.get("status") not in REVIEW_CONCLUSIONS:
         problems.append("approval #%d (unit-review): status is invalid" % index)
-    for key in ("manifestVersion", "manifestHash"):
-        if not present(record, key):
-            problems.append("approval #%d (unit-review): %s is required" % (index, key))
-    if not isinstance(record.get("manifestHash"), str) or not MANIFEST_HASH_RE.match(record.get("manifestHash", "")):
-        problems.append("approval #%d (unit-review): manifestHash is invalid" % index)
+    if not present(record, "manifestVersion"):
+        problems.append("approval #%d (unit-review): manifestVersion is required" % index)
+    for key in ("manifestHash", "outputHash"):
+        if not isinstance(record.get(key), str) or not MANIFEST_HASH_RE.match(record[key]):
+            problems.append("approval #%d (unit-review): %s is invalid" % (index, key))
     if not valid_file_scope(record.get("fileScope")):
         problems.append("approval #%d (unit-review): fileScope is invalid" % index)
     reviewer = record.get("reviewer")
     if not isinstance(reviewer, dict) or reviewer.get("type") != "subagent" or not present(reviewer, "name"):
         problems.append("approval #%d (unit-review): reviewer must be a named subagent" % index)
-    if record.get("conclusion") not in ("approved", "changes-requested"):
+    if record.get("conclusion") not in REVIEW_CONCLUSIONS:
         problems.append("approval #%d (unit-review): conclusion is invalid" % index)
     evidence = record.get("evidence")
     if not isinstance(evidence, list) or not evidence or any(not isinstance(item, str) or not item.strip() for item in evidence):
         problems.append("approval #%d (unit-review): evidence must be a non-empty string array" % index)
     if "gate" in record:
         problems.append("approval #%d: unit-review cannot be a gate" % index)
-    if present(record, "unitId"):
-        latest_reviews[unit_id] = record
+
+
+def latest_unit_reviews(records):
+    latest = {}
+    for record in records if isinstance(records, list) else []:
+        if isinstance(record, dict) and record.get("kind") == "unit-review" and present(record, "unitId"):
+            latest[record["unitId"]] = record
+    return latest
+
+
+def unit_output_hash(ws, unit):
+    """sha256 over the unit's declared output files, or None when one is missing."""
+    digest = hashlib.sha256()
+    for relative in unit.get("files", []) if isinstance(unit, dict) else []:
+        path = Path(ws) / relative
+        if not isinstance(relative, str) or not path.is_file():
+            return None
+        digest.update(relative.encode("utf-8") + b"\0" + path.read_bytes() + b"\0")
+    return "sha256:" + digest.hexdigest()
+
+
+def review_current(ws, review, manifest, unit):
+    """An approved review still vouches for the unit: same manifest and same output bytes."""
+    return (
+        review_matches(review, manifest)
+        and review.get("conclusion") == "approved"
+        and review.get("outputHash") == unit_output_hash(ws, unit)
+    )
+
+
+def unsatisfied_dependencies(ws, manifest, status_by_id, latest_reviews, unit):
+    units = {item.get("id"): item for item in manifest.get("units", []) if isinstance(item, dict)}
+    missing = []
+    for dep in unit.get("dependsOn", []) if isinstance(unit, dict) else []:
+        if status_by_id.get(dep, "not-started") not in DONE_UNIT_STATUSES or dep not in units or not review_current(
+            ws, latest_reviews.get(dep), manifest, units[dep]
+        ):
+            missing.append(dep)
+    return missing
 
 
 def check_approvals(ws, phase, release, problems):
@@ -349,14 +389,13 @@ def check_approvals(ws, phase, release, problems):
         problems.append("project/approvals.json: must be a list of gate or unit-review records")
         records = []
     latest_gates = {}
-    latest_reviews = {}
     for i, record in enumerate(records):
         if not isinstance(record, dict):
             problems.append("approval #%d: needs gate in %s" % (i, GATES))
             continue
         kind = record.get("kind")
         if kind == "unit-review":
-            check_unit_review(record, i, latest_reviews, problems)
+            check_unit_review(record, i, problems)
             continue
         if kind not in (None, "gate"):
             problems.append("approval #%d: kind must be gate or unit-review" % i)
@@ -381,7 +420,7 @@ def check_approvals(ws, phase, release, problems):
     for gate in needed:
         if latest_gates.get(gate) != "approved":
             problems.append("phase %d requires gate %s approved (latest record decides)" % (phase, gate))
-    return latest_gates, latest_reviews
+    return latest_gates, latest_unit_reviews(records)
 
 
 def output_exists(ws, unit):
@@ -432,21 +471,17 @@ def check_units(ws, phase, status, manifest, latest_reviews, problems):
         status_by_id[unit_id] = item.get("status")
         if item.get("status") not in UNIT_STATUSES:
             problems.append("unit %s has invalid status" % unit_id)
-    if any(status_value == "changes-requested" for status_value in status_by_id.values()) or any(
-        unit.get("status") == "changes-requested" for unit in manifest_units.values()
-    ):
+    if "changes-requested" in status_by_id.values():
         problems.append("changes-requested blocks phase progression")
     for unit_id, unit in manifest_units.items():
         state = status_by_id.get(unit_id, "not-started")
-        depends = unit.get("dependsOn", []) if isinstance(unit, dict) else []
-        if state == "in-progress" and any(status_by_id.get(dep, "not-started") not in ("approved", "completed") for dep in depends):
+        if state == "in-progress" and unsatisfied_dependencies(ws, manifest, status_by_id, latest_reviews, unit):
             problems.append("unit %s: in-progress requires approved dependencies" % unit_id)
         if state == "in-review" and not output_exists(ws, unit):
             problems.append("unit %s: in-review requires output" % unit_id)
         review = latest_reviews.get(unit_id)
-        if state in ("approved", "completed"):
-            if not review_matches(review, manifest) or review.get("conclusion") != "approved":
-                problems.append("unit %s: %s requires an approved unit-review matching the latest manifest" % (unit_id, state))
+        if state in DONE_UNIT_STATUSES and not review_current(ws, review, manifest, unit):
+            problems.append("unit %s: %s requires an approved unit-review matching the latest manifest and output" % (unit_id, state))
         if unit_id not in latest_reviews:
             problems.append("unit %s requires unit-review" % unit_id)
 

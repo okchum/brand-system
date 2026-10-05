@@ -100,7 +100,7 @@ brand-workspace/
 
 产品 UI 的契约文件由后续实现创建：`config/ui.json` 描述 `version`、平台数组、`stackProfile`、固定的 `tokenSource: "tokens/src"` 和 `deliveryStatus`；`src/ui/ir/manifest.json` 描述 `manifestVersion`、`hash` 与 unit 清单。两者的字段定义以 `assets/brief.schema.json` 的 `$defs.uiConfig` 与 `$defs.irManifest` 为准，不在其他文档中另造字段。
 
-`project/status.json` 的 `units` 字段是数组，每项只有 `unitId`、`status`，可选 `updatedAt` 与 `note`；status 复用 `$defs.unitStatus` 的有限集合 `in-progress`、`in-review`、`approved`、`changes-requested`、`completed`。`project/approvals.json` 每条记录必须带 `kind`，只能是 `gate` 或 `unit-review`。unit review 必须绑定 unitId、manifestVersion、manifestHash、文件范围、subagent reviewer、结论和非空证据；完整字段以 `$defs.unitReviewApproval` 为准。
+`project/status.json` 的 `units` 字段是数组，每项只有 `unitId`、`status`，可选 `updatedAt` 与 `note`；status 复用 `$defs.unitStatus` 的有限集合 `not-started`、`in-progress`、`in-review`、`approved`、`changes-requested`、`completed`。`project/approvals.json` 每条记录必须带 `kind`，只能是 `gate` 或 `unit-review`。unit review 必须绑定 unitId、manifestVersion、manifestHash、文件范围、subagent reviewer、结论和非空证据；完整字段以 `$defs.unitReviewApproval` 为准。
 
 第三方图标、照片、字体引用与依赖记录来源及许可。品牌资产、第三方资源和生成脚本可以有不同许可；不要因为构建代码开源，就擅自把品牌标志置于开源许可或公有领域。
 

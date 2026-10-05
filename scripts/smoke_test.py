@@ -38,8 +38,9 @@ def review_units_in_order(workspace):
     units = json.loads((workspace / "src/ui/ir/manifest.json").read_text(encoding="utf-8"))["units"]
     for unit in units:
         relative = workbench.unit_output_path(unit["id"])
-        workbench.prepare_unit_generation(workspace, unit["id"])
-        workbench.mark_unit_in_review(workspace, unit["id"], [relative])
+        workbench.begin_unit_generation(workspace, unit["id"])
+        write_file(workspace, relative)
+        workbench.mark_unit_in_review(workspace, unit["id"])
         workbench.append_unit_review(
             workspace,
             unit["id"],
@@ -47,6 +48,7 @@ def review_units_in_order(workspace):
             reviewer={"type": "subagent", "name": "smoke-reviewer"},
             evidence=["smoke fixture evidence"],
             file_scope=[{"path": relative, "startLine": 1, "endLine": 1}],
+            output_hash=check_workspace.unit_output_hash(workspace, unit),
         )
 
 

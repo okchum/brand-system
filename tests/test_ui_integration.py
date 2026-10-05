@@ -49,7 +49,7 @@ class UiIntegrationTest(unittest.TestCase):
             self.assertEqual(ui["deliveryStatus"], "preview-only")
             self.assertRegex(manifest["hash"], r"^sha256:[0-9a-f]{64}$")
             self.assertEqual([unit["kind"] for unit in manifest["units"]], list(workbench.UI_UNIT_KINDS))
-            self.assertEqual([unit["status"] for unit in manifest["units"]], ["in-progress"] * 5)
+            self.assertEqual([unit["status"] for unit in manifest["units"]], ["not-started"] * 5)
             self.assertEqual([unit["unitId"] for unit in status["units"]], [unit["id"] for unit in manifest["units"]])
             self.assertEqual(check_workspace.check(workspace, 0), [])
 
@@ -69,7 +69,7 @@ class UiIntegrationTest(unittest.TestCase):
     def test_dependency_progression_requires_approved_review_and_rejects_changes_requested(self):
         with tempfile.TemporaryDirectory() as root:
             workspace = self.init_workspace(root)
-            workbench.mark_unit_in_review(workspace, "page-map", ["src/ui/units/page-map/output.html"])
+            self.generate(workspace, "page-map")
             workbench.set_unit_status(workspace, "page-map", "approved")
             with self.assertRaisesRegex(ValueError, "dependencies"):
                 workbench.prepare_unit_generation(workspace, "layout")
@@ -81,13 +81,13 @@ class UiIntegrationTest(unittest.TestCase):
                 workbench.prepare_unit_generation(workspace, "layout")
 
             workbench.set_unit_status(workspace, "page-map", "approved")
-            workbench.mark_unit_in_review(workspace, "layout", ["src/ui/units/layout/output.html"])
+            self.generate(workspace, "layout")
             self.assertEqual(self.read(workspace, "project/status.json")["units"][1]["status"], "in-review")
 
     def test_status_updates_preserve_manifest_hash_and_review_binding(self):
         with tempfile.TemporaryDirectory() as root:
             workspace = self.init_workspace(root)
-            workbench.mark_unit_in_review(workspace, "page-map", ["src/ui/units/page-map/output.html"])
+            self.generate(workspace, "page-map")
             before = self.read(workspace, "src/ui/ir/manifest.json")
             record = workbench.append_unit_review(
                 workspace,
@@ -95,14 +95,26 @@ class UiIntegrationTest(unittest.TestCase):
                 "approved",
                 reviewer={"type": "subagent", "name": "ui-reviewer"},
                 evidence=["integration assertion"],
-                file_scope=[{"path": "src/ui/units/page-map/output.html", "startLine": 1, "endLine": 1}],
+                file_scope=[{"path": workbench.unit_output_path("page-map"), "startLine": 1, "endLine": 1}],
+                output_hash=self.output_hash(workspace, "page-map"),
             )
             after = self.read(workspace, "src/ui/ir/manifest.json")
             self.assertEqual(after["hash"], before["hash"])
             self.assertEqual(record["manifestVersion"], after["manifestVersion"])
             self.assertEqual(record["manifestHash"], after["hash"])
 
+    def generate(self, workspace, unit_id):
+        self.write(workspace, workbench.unit_output_path(unit_id), "<main>%s</main>\n" % unit_id)
+        workbench.begin_unit_generation(workspace, unit_id)
+        workbench.mark_unit_in_review(workspace, unit_id)
+
+    def output_hash(self, workspace, unit_id):
+        manifest = self.read(workspace, "src/ui/ir/manifest.json")
+        unit = next(item for item in manifest["units"] if item["id"] == unit_id)
+        return check_workspace.unit_output_hash(Path(workspace), unit)
+
     def add_review(self, workspace, unit_id, conclusion="approved"):
+        """Hand-written record, so the checker is also tested against input the workbench did not produce."""
         manifest = self.read(workspace, "src/ui/ir/manifest.json")
         unit = next(item for item in manifest["units"] if item["id"] == unit_id)
         file_path = unit["files"][0]
@@ -114,6 +126,7 @@ class UiIntegrationTest(unittest.TestCase):
             "unitId": unit_id,
             "manifestVersion": manifest["manifestVersion"],
             "manifestHash": manifest["hash"],
+            "outputHash": self.output_hash(workspace, unit_id),
             "fileScope": [{"path": file_path, "startLine": 1, "endLine": 1}],
             "reviewer": {"type": "subagent", "name": "ui-reviewer"},
             "conclusion": conclusion,
@@ -140,14 +153,15 @@ class UiIntegrationTest(unittest.TestCase):
                 if relative == "review/01-directions.html":
                     content = (ROOT / "evals/directions.fixture.html").read_text(encoding="utf-8")
                 self.write(workspace, relative, content)
-        units = self.read(workspace, "src/ui/ir/manifest.json")["units"]
-        for unit in units:
-            unit_id = unit["id"]
-            workbench.mark_unit_in_review(workspace, unit_id, ["src/ui/units/%s/output.html" % unit_id])
-        for unit in units:
-            workbench.set_unit_status(workspace, unit["id"], "completed")
-        for unit in units:
-            self.add_review(workspace, unit["id"])
+        for unit in self.read(workspace, "src/ui/ir/manifest.json")["units"]:
+            self.generate(workspace, unit["id"])
+            workbench.append_unit_review(
+                workspace, unit["id"], "approved",
+                reviewer={"type": "subagent", "name": "ui-reviewer"},
+                evidence=["focused integration assertion"],
+                file_scope=[{"path": workbench.unit_output_path(unit["id"]), "startLine": 1, "endLine": 1}],
+                output_hash=self.output_hash(workspace, unit["id"]),
+            )
         approvals = json.loads((workspace / "project/approvals.json").read_text(encoding="utf-8"))
         for number in range(1, 4):
             approvals.append({

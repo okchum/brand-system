@@ -60,10 +60,10 @@ class UiCheckerTest(unittest.TestCase):
         }
 
     @staticmethod
-    def approved_review(unit_id, conclusion="approved", version="2026.10.05.1", manifest_hash=MANIFEST_HASH):
+    def approved_review(unit_id, conclusion="approved", version="2026.10.05.1", manifest_hash=MANIFEST_HASH, output_hash="sha256:" + "c" * 64):
         return {
             "kind": "unit-review", "status": "approved", "unitId": unit_id,
-            "manifestVersion": version, "manifestHash": manifest_hash,
+            "manifestVersion": version, "manifestHash": manifest_hash, "outputHash": output_hash,
             "fileScope": [{"path": "src/ui/map.html", "startLine": 1, "endLine": 2}],
             "reviewer": {"type": "subagent", "name": "ui-reviewer"},
             "conclusion": conclusion, "evidence": ["python -m unittest"],
@@ -173,6 +173,27 @@ class UiCheckerTest(unittest.TestCase):
         review["fileScope"] = [{"path": "src/ui/layout.html", "startLine": 1, "endLine": 1}]
         findings = self.findings(status=status, approvals=[review])
         self.assert_finding(findings, "unit-review map fileScope must name its unit files")
+
+    def test_approved_unit_review_is_bound_to_current_output_content(self):
+        status = {"phase": 4, "blockers": [], "units": [{"unitId": "map", "status": "approved"}]}
+        root = self.make_workspace(status=status)
+        output = root / "src/ui/map.html"
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_text("<main>map</main>\n", encoding="utf-8")
+        digest = check_workspace.unit_output_hash(root, self.valid_manifest()["units"][0])
+        self.assertRegex(digest, r"^sha256:[0-9a-f]{64}$")
+        (root / "project/approvals.json").write_text(json.dumps([self.approved_review("map", output_hash=digest)]), encoding="utf-8")
+        self.assertNotIn("unit map: approved", " ".join(check_workspace.check(root, 4)))
+        output.write_text("<main>edited</main>\n", encoding="utf-8")
+        self.assert_finding(check_workspace.check(root, 4), "unit map: approved requires an approved unit-review matching the latest manifest and output")
+
+    def test_unit_review_record_requires_output_hash_and_named_reviewer(self):
+        review = self.approved_review("map")
+        review.pop("outputHash")
+        review["reviewer"] = {"type": "subagent", "name": ""}
+        findings = self.findings(approvals=[review])
+        self.assert_finding(findings, "outputHash is invalid")
+        self.assert_finding(findings, "reviewer must be a named subagent")
 
     def test_each_manifest_unit_requires_its_own_review(self):
         status = {"phase": 4, "blockers": [], "units": [

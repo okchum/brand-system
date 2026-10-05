@@ -71,7 +71,7 @@ class UiContractTest(unittest.TestCase):
         )
         self.assertEqual(
             self.defs["unitStatus"]["enum"],
-            ["in-progress", "in-review", "approved", "changes-requested", "completed"],
+            ["not-started", "in-progress", "in-review", "approved", "changes-requested", "completed"],
         )
         self.assertEqual(
             set(self.defs["manifestUnit"]["required"]),
@@ -96,6 +96,7 @@ class UiContractTest(unittest.TestCase):
                 "unitId",
                 "manifestVersion",
                 "manifestHash",
+                "outputHash",
                 "fileScope",
                 "reviewer",
                 "conclusion",

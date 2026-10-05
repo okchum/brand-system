@@ -1,0 +1,25 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "UI unit review verdict",
+  "description": "独立审查进程对一个 UI unit 输出给出的结论；approved 仅在没有 P0/P1 问题时使用。",
+  "type": "object",
+  "required": ["conclusion", "summary", "findings"],
+  "additionalProperties": false,
+  "properties": {
+    "conclusion": { "type": "string", "enum": ["approved", "changes-requested"] },
+    "summary": { "type": "string", "minLength": 1 },
+    "findings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["severity", "location", "problem"],
+        "additionalProperties": false,
+        "properties": {
+          "severity": { "type": "string", "enum": ["P0", "P1", "P2", "P3"] },
+          "location": { "type": "string", "minLength": 1 },
+          "problem": { "type": "string", "minLength": 1 }
+        }
+      }
+    }
+  }
+}
