@@ -857,7 +857,7 @@ def _unit_prompt(path, unit, choice):
 
 
 def _review_prompt(unit):
-    return f"""你是独立审查者，只读不写。审查 UI unit「{unit['id']}」（类型 {unit.get('kind')}）的输出 {'、'.join(unit['files'])}。对照 {ROOT / "references/ui.md"}、{ROOT / "references/accessibility.md"}、src/ui/ir/manifest.json 中该 unit 的 platforms 与 dependsOn、tokens/src/，以及依赖 unit 的输出。检查：是否满足该类型的职责，组件是否复用而不是重复造，状态（hover、focus-visible、disabled、loading、invalid、空、错误）是否齐全，颜色与间距是否只引用 token，平台语义是否写清，可访问性。每个问题给出严重度 P0–P3、位置和具体问题。只有没有 P0/P1 时结论才是 approved，否则是 changes-requested。"""
+    return f"""你是独立审查者，只读不写。审查 UI unit「{unit['id']}」（类型 {unit.get('kind')}）的输出 {'、'.join(unit['files'])}。对照 {ROOT / "references/ui.md"}、{ROOT / "references/accessibility.md"}、src/ui/ir/manifest.json 中该 unit 的 platforms 与 dependsOn、tokens/src/，以及依赖 unit 的输出。检查：是否满足该类型的职责，组件是否复用而不是重复造，状态（hover、focus-visible、disabled、loading、invalid、空、错误）是否齐全，颜色与间距是否只引用 token，平台语义是否写清，可访问性。每个问题给出严重度 P0–P3、位置和具体问题。metadata.json 里的 outputHash 与 manifestHash 由工作台按自己的算法计算和绑定，不要自行核对或把它们列为问题。只有没有 P0/P1 时结论才是 approved，否则是 changes-requested。"""
 
 
 # Paths a unit job may not change outside its own unit directory.
