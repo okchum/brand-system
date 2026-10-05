@@ -1133,6 +1133,9 @@ class UiWorkbenchHttpTest(unittest.TestCase):
             self.assertEqual(self.call("/api/approve", dict(body, path=str(self.workspace)))[0], 200)
         code, payload = self.call("/api/approve", {"path": str(self.workspace), "gate": "G1", "status": "changes-requested"})
         self.assertEqual((code, payload["withdrawn"]), (200, ["G1", "G2"]))
+        # The withdrawn gate's own phase is what has to change, so the workspace goes back there.
+        status = json.loads((self.workspace / "project/status.json").read_text(encoding="utf-8"))
+        self.assertEqual((status["phase"], status["state"]), (1, "draft"))
         self.call("/api/approve", {"path": str(self.workspace), "gate": "G1", "choice": "A"})
         self.assertEqual(workbench._missing_gates(self.workspace, 3), ["G2"])
 

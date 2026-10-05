@@ -718,6 +718,12 @@ def _withdraw_gate(path, gate):
                 "requestedAt": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
             })
         _write_json(approvals_path, records)
+        # Gk approves phase k's deliverables; asking for changes means going back to regenerate them.
+        status_path = path / "project/status.json"
+        status = _read_json(status_path)
+        if int(status.get("phase", 0)) > int(gate[1:]):
+            status.update(phase=int(gate[1:]), state="draft")
+            _write_json(status_path, status)
         return withdrawn
 
 
