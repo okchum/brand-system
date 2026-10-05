@@ -350,6 +350,54 @@ class UiWorkbenchTest(unittest.TestCase):
             self.assertEqual(len(calls), 1)
             self.assertEqual(self.unit_status(workspace, "page-map")["status"], "in-progress")
 
+    def test_timed_out_unit_job_still_restores_files_outside_its_unit(self):
+        with tempfile.TemporaryDirectory() as root:
+            workspace = self.phase_four(root)
+            before = (workspace / "project/approvals.json").read_text(encoding="utf-8")
+
+            def stray_then_timeout(cmd, cwd, timeout):
+                (Path(cwd) / "project/approvals.json").write_text("[]", encoding="utf-8")
+                write_output(cwd, "layout", "<main>written by the wrong job</main>\n")
+                raise TimeoutError("codex 进程超过 10 分钟未完成")
+            with mock.patch.object(workbench, "_run_codex", side_effect=stray_then_timeout):
+                job = wait_for(workbench.start_unit_job(workspace, 4, "page-map"))
+            self.assertEqual(job["status"], "error")
+            self.assertIn("超过 10 分钟", job["error"])
+            self.assertIn("project/approvals.json", job["error"])
+            self.assertEqual((workspace / "project/approvals.json").read_text(encoding="utf-8"), before)
+            self.assertFalse((workspace / workbench.unit_output_path("layout")).exists())
+
+    def test_unit_job_failure_path_always_releases_the_workspace(self):
+        with tempfile.TemporaryDirectory() as root:
+            workspace = self.phase_four(root)
+            real_set = workbench.set_unit_status
+
+            def failing_note(path, unit_id, status, note=None):
+                if note:
+                    raise OSError("disk full")
+                return real_set(path, unit_id, status, note)
+            with mock.patch.object(workbench, "_run_codex", return_value=1), \
+                    mock.patch.object(workbench, "set_unit_status", side_effect=failing_note):
+                job = wait_for(workbench.start_unit_job(workspace, 4, "page-map"))
+            self.assertEqual(job["status"], "error")
+            self.assertIsNone(workbench._running_job(workspace))
+
+            with mock.patch.object(workbench, "_protected_snapshot", side_effect=OSError("unreadable")):
+                with self.assertRaises(OSError):
+                    workbench.start_unit_job(workspace, 4, "page-map")
+            self.assertIsNone(workbench._running_job(workspace))
+
+    def test_unit_jobs_get_no_write_access_to_the_skill_repo(self):
+        with tempfile.TemporaryDirectory() as root:
+            workspace = self.phase_four(root)
+            verdict = {"conclusion": "approved", "summary": "ok", "findings": []}
+            _, calls = self.run_unit_job(workspace, "page-map", verdict=verdict)
+            self.assertEqual(len(calls), 2)
+            for cmd in calls:
+                self.assertNotIn("--add-dir", cmd)
+            self.assertIn(str(ROOT / "references/ui.md"), calls[0][-1])
+            self.assertIn(str(ROOT / "references/ui.md"), calls[1][-1])
+
     def test_unit_job_requires_phase_four_gates_and_one_job_per_workspace(self):
         with tempfile.TemporaryDirectory() as root:
             workspace = self.init(root)

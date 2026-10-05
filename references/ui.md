@@ -52,7 +52,7 @@
 | 只重新审查（`POST /api/review`） | `in-review` | 当前阶段为 Phase 4；没有正在运行的任务 | 重新运行自动审查 |
 | 外部 agent 记录审查（`POST /api/approve`，`kind=unit-review`） | `in-review` | reviewer 为有名字的 subagent；`fileScope` 只引用该 unit 的输出文件；`outputHash` 等于输出文件当前内容 | 追加 unit-review；unit 变为 `approved` 或 `changes-requested` |
 
-自动审查由工作台另起一个只读的 `codex exec`（`-s read-only`），按 `assets/unit-review-verdict.schema.json` 输出结论并写入 `src/ui/units/<unitId>/review.json`；它与生成进程是两个独立进程，不复用生成时的上下文。生成 unit 时使用只针对该 unit 的 prompt，进程只能写工作区，结束后工作台核对 `project/`、`src/ui/ir/` 与其他 unit 目录没有被改动。
+自动审查由工作台另起一个只读的 `codex exec`（`-s read-only`），按 `assets/unit-review-verdict.schema.json` 输出结论并写入 `src/ui/units/<unitId>/review.json`；它与生成进程是两个独立进程，不复用生成时的上下文。生成 unit 时使用只针对该 unit 的 prompt，进程只能写工作区：生成与审查都不加 `--add-dir`，因为加进去的目录会变成可写，技能目录的参考文档只按绝对路径读取。进程结束后（包括失败和超时），工作台先核对 `project/`、`config/`、`src/ui/ir/` 与其他 unit 目录有没有被改动，有就恢复原样，再报告结果。
 
 生成任务的状态只反映生成（unit 任务还包括自动审查）是否成功。阶段检查的结果单独返回并显示在页面上：Phase 4 在所有 unit 审查完之前检查本来就不会通过，这不等于生成失败；推进阶段时仍以检查通过为前提。
 

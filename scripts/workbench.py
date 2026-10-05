@@ -604,11 +604,11 @@ def start_generation(path, phase):
 def _unit_prompt(path, unit, choice):
     ui = _read_json(path / "config/ui.json", {})
     inputs = "、".join(unit_output_path(dep) for dep in unit.get("dependsOn", [])) or "无"
-    return f"""只完成 UI unit「{unit['id']}」（类型 {unit.get('kind')}），把页面写到 {unit_output_path(unit['id'])}。只写入 {unit_dir(unit['id'])}/ 目录；不要修改 project/、config/、src/ui/ir/ 以及其他 unit 的目录。读取 src/ui/ir/manifest.json、config/ui.json、brand.brief.json、tokens/src/，以及依赖 unit 的输出：{inputs}。按技能目录 references/ui.md 中该类型的要求完成；颜色、字号、间距只引用 tokens/src 的 token，不复制数值。目标平台：{'、'.join(ui.get('platforms', []))}；技术栈：{ui.get('stackProfile', '')}；Desktop 与 Mobile 以 Web preview 呈现，同时写清平台语义，方便转换为 native 代码。品牌方向为 Direction {choice}。不要只解释，直接创建文件。"""
+    return f"""只完成 UI unit「{unit['id']}」（类型 {unit.get('kind')}），把页面写到 {unit_output_path(unit['id'])}。只写入 {unit_dir(unit['id'])}/ 目录；不要修改 project/、config/、src/ui/ir/、tokens/ 以及其他 unit 的目录。读取 src/ui/ir/manifest.json、config/ui.json、brand.brief.json、tokens/src/，以及依赖 unit 的输出：{inputs}。按 {ROOT / "references/ui.md"} 中该类型的要求完成（该文件只读）；颜色、字号、间距只引用 tokens/src 的 token，不复制数值。目标平台：{'、'.join(ui.get('platforms', []))}；技术栈：{ui.get('stackProfile', '')}；Desktop 与 Mobile 以 Web preview 呈现，同时写清平台语义，方便转换为 native 代码。品牌方向为 Direction {choice}。不要只解释，直接创建文件。"""
 
 
 def _review_prompt(unit):
-    return f"""你是独立审查者，只读不写。审查 UI unit「{unit['id']}」（类型 {unit.get('kind')}）的输出 {unit_output_path(unit['id'])}。对照技能目录 references/ui.md、references/accessibility.md、src/ui/ir/manifest.json 中该 unit 的 platforms 与 dependsOn、tokens/src/，以及依赖 unit 的输出。检查：是否满足该类型的职责，组件是否复用而不是重复造，状态（hover、focus-visible、disabled、loading、invalid、空、错误）是否齐全，颜色与间距是否只引用 token，平台语义是否写清，可访问性。每个问题给出严重度 P0–P3、位置和具体问题。只有没有 P0/P1 时结论才是 approved，否则是 changes-requested。"""
+    return f"""你是独立审查者，只读不写。审查 UI unit「{unit['id']}」（类型 {unit.get('kind')}）的输出 {unit_output_path(unit['id'])}。对照 {ROOT / "references/ui.md"}、{ROOT / "references/accessibility.md"}、src/ui/ir/manifest.json 中该 unit 的 platforms 与 dependsOn、tokens/src/，以及依赖 unit 的输出。检查：是否满足该类型的职责，组件是否复用而不是重复造，状态（hover、focus-visible、disabled、loading、invalid、空、错误）是否齐全，颜色与间距是否只引用 token，平台语义是否写清，可访问性。每个问题给出严重度 P0–P3、位置和具体问题。只有没有 P0/P1 时结论才是 approved，否则是 changes-requested。"""
 
 
 # Paths a unit job may not change outside its own unit directory.
@@ -648,7 +648,7 @@ def _review_unit(job_id, path, unit_id):
         verdict_path.unlink()
     _job_log(job_id, "正在启动独立审查进程（只读）…", "审查 unit %s" % unit_id)
     cmd = [
-        "codex", "exec", "--ephemeral", "--skip-git-repo-check", "-s", "read-only", "-C", str(path), "--add-dir", str(ROOT),
+        "codex", "exec", "--ephemeral", "--skip-git-repo-check", "-s", "read-only", "-C", str(path),
         "--output-schema", str(ROOT / "assets/unit-review-verdict.schema.json"), "-o", str(verdict_path), _review_prompt(unit),
     ]
     code = _run_codex(cmd, path, 600)
@@ -681,12 +681,17 @@ def _review_unit(job_id, path, unit_id):
 
 
 def _fail_unit_job(job_id, path, unit_id, exc):
-    state = _unit_states(path).get(unit_id)
-    if state == "in-progress":
-        set_unit_status(path, unit_id, "in-progress", "生成失败：%s" % exc)
-    elif state == "in-review":
-        set_unit_status(path, unit_id, "in-review", "自动审查失败：%s" % exc)
-    _finish_job(job_id, "error", str(exc))
+    error = str(exc)
+    try:
+        state = _unit_states(path).get(unit_id)
+        if state == "in-progress":
+            set_unit_status(path, unit_id, "in-progress", "生成失败：%s" % exc)
+        elif state == "in-review":
+            set_unit_status(path, unit_id, "in-review", "自动审查失败：%s" % exc)
+    except Exception as note_error:
+        error += "（记录失败原因时也出错：%s）" % note_error
+    # Always reached: a job left "running" refuses every later job, approval and advance in this workspace.
+    _finish_job(job_id, "error", error)
 
 
 def start_unit_job(path, phase, unit_id):
@@ -699,20 +704,31 @@ def start_unit_job(path, phase, unit_id):
     job_id = _create_job(path, prompt, unit_id)
     try:
         begin_unit_generation(path, unit_id)
+        before = _protected_snapshot(path, unit_id)
     except Exception:
         with JOBS_LOCK:
             JOBS.pop(job_id, None)
         raise
-    before = _protected_snapshot(path, unit_id)
 
     def run():
-        cmd = ["codex", "exec", "--ephemeral", "--skip-git-repo-check", "-s", "workspace-write", "-C", str(path), "--add-dir", str(ROOT), "--json", prompt]
+        # No --add-dir: extra dirs become writable, and the skill repo must stay out of a unit job's reach.
+        cmd = ["codex", "exec", "--ephemeral", "--skip-git-repo-check", "-s", "workspace-write", "-C", str(path), "--json", prompt]
         try:
             _job_log(job_id, "正在生成 unit %s…" % unit_id, "生成 unit %s" % unit_id)
-            code = _run_codex(cmd, path, 600)
+            run_error, code = None, None
+            try:
+                code = _run_codex(cmd, path, 600)
+            except Exception as exc:
+                run_error = exc
+            # Restore before reporting anything: a timeout or crash may already have written outside the unit.
             changed = _restore_outside_unit(path, unit_id, before)
             if changed:
-                raise RuntimeError("生成进程改动了 unit 目录以外的文件，已恢复原样：" + "、".join(changed))
+                raise RuntimeError(
+                    ("%s；" % run_error if run_error else "")
+                    + "生成进程改动了 unit 目录以外的文件，已恢复原样：" + "、".join(changed)
+                )
+            if run_error:
+                raise run_error
             if code != 0:
                 raise RuntimeError("生成进程退出码 %d" % code)
             mark_unit_in_review(path, unit_id)
