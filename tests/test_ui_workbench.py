@@ -398,6 +398,23 @@ class UiWorkbenchTest(unittest.TestCase):
             self.assertIn(str(ROOT / "references/ui.md"), calls[0][-1])
             self.assertIn(str(ROOT / "references/ui.md"), calls[1][-1])
 
+    def test_regeneration_prompt_carries_the_previous_review_and_note(self):
+        with tempfile.TemporaryDirectory() as root:
+            workspace = self.phase_four(root)
+            write_output(workspace, "page-map")
+            workbench.begin_unit_generation(workspace, "page-map")
+            workbench.mark_unit_in_review(workspace, "page-map")
+            workbench.append_unit_review(
+                workspace, "page-map", "changes-requested", reviewer=REVIEWER,
+                evidence=["src/ui/units/page-map/review.json", "Navigation misses focus state", "P1 nav：no focus-visible style"],
+                file_scope=[{"path": workbench.unit_output_path("page-map"), "startLine": 1, "endLine": 1}],
+                output_hash=current_output_hash(workspace, "page-map"),
+            )
+            with mock.patch.object(workbench, "_run_codex", return_value=1):
+                job = wait_for(workbench.start_unit_job(workspace, 4, "page-map"))
+            self.assertIn("no focus-visible style", job["prompt"])
+            self.assertIn("Navigation misses focus state", job["prompt"])
+
     def test_unit_job_requires_phase_four_gates_and_one_job_per_workspace(self):
         with tempfile.TemporaryDirectory() as root:
             workspace = self.init(root)

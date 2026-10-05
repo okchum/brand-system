@@ -601,10 +601,23 @@ def start_generation(path, phase):
     return job_id
 
 
+def _unit_feedback(path, unit_id):
+    """What the last review and the unit's status note asked for, so a regeneration can act on it."""
+    lines = []
+    review = check_workspace.latest_unit_reviews(_read_json(path / "project/approvals.json", [])).get(unit_id)
+    if review and review.get("conclusion") == "changes-requested":
+        lines.append("上次审查要求修改，逐条处理：" + "；".join(review.get("evidence", [])))
+    units = _read_json(path / "project/status.json").get("units", [])
+    note = next((item.get("note") for item in units if isinstance(item, dict) and item.get("unitId") == unit_id), "")
+    if note:
+        lines.append("当前备注：" + note)
+    return "".join(line + "。" for line in lines)
+
+
 def _unit_prompt(path, unit, choice):
     ui = _read_json(path / "config/ui.json", {})
     inputs = "、".join(unit_output_path(dep) for dep in unit.get("dependsOn", [])) or "无"
-    return f"""只完成 UI unit「{unit['id']}」（类型 {unit.get('kind')}），把页面写到 {unit_output_path(unit['id'])}。只写入 {unit_dir(unit['id'])}/ 目录；不要修改 project/、config/、src/ui/ir/、tokens/ 以及其他 unit 的目录。读取 src/ui/ir/manifest.json、config/ui.json、brand.brief.json、tokens/src/，以及依赖 unit 的输出：{inputs}。按 {ROOT / "references/ui.md"} 中该类型的要求完成（该文件只读）；颜色、字号、间距只引用 tokens/src 的 token，不复制数值。目标平台：{'、'.join(ui.get('platforms', []))}；技术栈：{ui.get('stackProfile', '')}；Desktop 与 Mobile 以 Web preview 呈现，同时写清平台语义，方便转换为 native 代码。品牌方向为 Direction {choice}。不要只解释，直接创建文件。"""
+    return f"""只完成 UI unit「{unit['id']}」（类型 {unit.get('kind')}），把页面写到 {unit_output_path(unit['id'])}。只写入 {unit_dir(unit['id'])}/ 目录；不要修改 project/、config/、src/ui/ir/、tokens/ 以及其他 unit 的目录。读取 src/ui/ir/manifest.json、config/ui.json、brand.brief.json、tokens/src/，以及依赖 unit 的输出：{inputs}。按 {ROOT / "references/ui.md"} 中该类型的要求完成（该文件只读）；颜色、字号、间距只引用 tokens/src 的 token，不复制数值。目标平台：{'、'.join(ui.get('platforms', []))}；技术栈：{ui.get('stackProfile', '')}；Desktop 与 Mobile 以 Web preview 呈现，同时写清平台语义，方便转换为 native 代码。品牌方向为 Direction {choice}。{_unit_feedback(path, unit['id'])}不要只解释，直接创建文件。"""
 
 
 def _review_prompt(unit):
