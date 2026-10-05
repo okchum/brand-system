@@ -10,6 +10,7 @@ so pass the real backdrop, not the palette swatch.
 """
 import json
 import math
+import re
 import sys
 
 THRESHOLDS = {"normal": 4.5, "large": 3.0, "ui": 3.0}
@@ -19,7 +20,7 @@ def parse(hex_color):
     h = hex_color.lstrip("#")
     if len(h) in (3, 4):
         h = "".join(c * 2 for c in h)
-    if len(h) not in (6, 8):
+    if len(h) not in (6, 8) or not re.fullmatch(r"[0-9a-fA-F]+", h):
         raise ValueError("not a hex color: %s" % hex_color)
     rgb = [int(h[i:i + 2], 16) / 255 for i in (0, 2, 4)]
     alpha = int(h[6:8], 16) / 255 if len(h) == 8 else 1.0
@@ -74,6 +75,9 @@ def main(argv):
 
 def run(argv):
     if argv[:1] == ["--matrix"]:
+        if len(argv) != 2:
+            print(__doc__)
+            return 2
         with open(argv[1], encoding="utf-8") as f:
             rows = check_matrix(json.load(f))
         print(json.dumps(rows, ensure_ascii=False, indent=2))

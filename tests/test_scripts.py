@@ -74,7 +74,8 @@ class ContrastTest(unittest.TestCase):
                 return ["--matrix", str(p)]
             for argv in (["#fff", "#000", "--size", "huge"], ["#ggg", "#000"], ["#fff", "#000", "--size"],
                          ["#000", "#fff", "large"], matrix("[]"), matrix('{"a": 1}'), matrix('["#000"]'),
-                         matrix('[{"fg": 123, "bg": "#fff"}]'), ["--matrix", str(Path(d) / "missing.json")]):
+                         matrix('[{"fg": 123, "bg": "#fff"}]'), ["--matrix", str(Path(d) / "missing.json")],
+                         ["--matrix"], ["+fffff", "#000"], ["# fffff", "#000"], ["-fffff", "#000"]):
                 with self.subTest(argv):
                     self.assertEqual(contrast.main(argv), 2)
 
@@ -279,6 +280,15 @@ class IconVerifyTest(Mentions, unittest.TestCase):
         self.assertEqual(info["errors"], [])
         self.assertEqual(info["sizes"], [(16, 16), (32, 32), (256, 256)])
 
+    def test_declared_size_must_match_embedded_png(self):
+        data = bytearray(ico_bytes([16]))
+        data[6:8] = bytes([32, 32])  # directory claims 32x32, embedded PNG is 16x16
+        self.assertMentions(self.verify("favicon.ico", bytes(data))["errors"], "declares 32x32 but its PNG is 16x16")
+        img = png_bytes(16, 16)
+        elem = b"ic08" + struct.pack(">I", 8 + len(img)) + img  # ic08 is 256x256
+        icns = b"icns" + struct.pack(">I", 8 + len(elem)) + elem
+        self.assertMentions(self.verify("app.icns", icns)["errors"], "declares 256x256 but its PNG is 16x16")
+
     def test_ico_without_images_fails(self):
         self.assertMentions(self.verify("favicon.ico", ico_bytes([]))["errors"], "no images")
 
@@ -374,9 +384,25 @@ class CheckWorkspaceTest(Mentions, unittest.TestCase):
 
     def test_release_requires_g5(self):
         gates = [dict(self.APPROVED_G1, gate="G%d" % k) for k in range(1, 5)]
-        self.assertEqual(self.findings(5, gates), [])
-        self.assertMentions(self.findings(5, gates, release=True), "requires gate G5")
-        self.assertEqual(self.findings(5, gates + [dict(self.APPROVED_G1, gate="G5")], release=True), [])
+
+        def gate_findings(*args, **kwargs):
+            # This fixture has no UI files; test_release_keeps_ui_contract covers those findings.
+            return [f for f in self.findings(*args, **kwargs) if "(contract)" not in f]
+
+        self.assertEqual(gate_findings(5, gates), [])
+        self.assertMentions(gate_findings(5, gates, release=True), "requires gate G5")
+        self.assertEqual(gate_findings(5, gates + [dict(self.APPROVED_G1, gate="G5")], release=True), [])
+
+    def test_release_keeps_ui_contract(self):
+        gates = [dict(self.APPROVED_G1, gate="G%d" % k) for k in range(1, 6)]
+        findings = self.findings(5, gates, release=True)
+        self.assertMentions(findings, "missing config/ui.json (contract)")
+        self.assertMentions(findings, "missing src/ui/ir/manifest.json (contract)")
+
+    def test_malformed_kind_withdraws_the_gate_it_names(self):
+        withdrawn = self.findings(2, [self.APPROVED_G1, {"kind": "Gate", "gate": "G1", "status": "changes-requested"}])
+        self.assertMentions(withdrawn, "kind must be gate or unit-review")
+        self.assertMentions(withdrawn, "requires gate G1")
 
     def test_malformed_approval_records_are_findings_not_crashes(self):
         for record in ({"gate": ["G1"], "status": "approved"}, {"status": "approved"},

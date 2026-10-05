@@ -43,6 +43,7 @@ UNIT_ID_RE = re.compile(r"^[a-z0-9][a-z0-9-]*$")
 AGENT_ROLES = ("generation", "review")
 # Reasoning effort values each engine's CLI accepts (codex: model_reasoning_effort; Claude Code: --effort).
 AGENT_EFFORTS = {"codex": ("low", "medium", "high"), "claude": ("low", "medium", "high", "xhigh", "max")}
+DEFAULT_ENGINE = "codex"
 AGENT_MODEL_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/\[\]-]*$")
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -56,18 +57,17 @@ def load_json(ws, rel, problems):
 
 
 def contract_files(phase):
-    path = ROOT / "config/phase_requirements.json"
-    try:
-        requirements = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return []
-    # UI-created files extend the legacy phase contract without replacing it.
-    result = []
-    ui_contract = requirements.get("uiContract", {})
-    for entry in ui_contract.get("phases", []):
-        if isinstance(entry, dict) and type(entry.get("phase")) is int and entry["phase"] <= phase and phase <= 4:
-            result.extend(rel for rel in entry.get("creates", []) if isinstance(rel, str))
-    return result
+    # UI-created files extend the legacy phase contract without replacing it, and stay required through release.
+    return [rel for entry in CONTRACT.get("uiContract", {}).get("phases", []) if entry["phase"] <= phase for rel in entry["creates"]]
+
+
+def unique_strings(value):
+    return isinstance(value, list) and all(isinstance(item, str) for item in value) and len(value) == len(set(value))
+
+
+def inside_workspace(relative):
+    """A manifest path names a file under the workspace: relative, without .. segments."""
+    return isinstance(relative, str) and bool(relative.strip()) and not Path(relative).is_absolute() and ".." not in Path(relative).parts
 
 
 def check_files(ws, phase, problems):
@@ -107,7 +107,7 @@ def check_frontend(frontend, label, problems):
     platforms = frontend.get("platforms")
     if not isinstance(platforms, list) or not platforms:
         problems.append("%s.platforms must be a non-empty array" % label)
-    elif len(platforms) != len(set(platforms)) or any(p not in UI_PLATFORMS for p in platforms):
+    elif not unique_strings(platforms) or any(p not in UI_PLATFORMS for p in platforms):
         problems.append("%s.platforms contains an invalid platform" % label)
     if frontend.get("stackProfile") not in STACK_PROFILES:
         problems.append("%s.stackProfile must be one of %s" % (label, list(STACK_PROFILES)))
@@ -193,8 +193,8 @@ def agent_settings_problems(agents):
             continue
         for key in sorted(set(setting) - {"engine", "model", "reasoningEffort"}):
             problems.append("%s.%s is not a known field" % (label, key))
-        engine = setting.get("engine", "codex")
-        if engine not in AGENT_EFFORTS:
+        engine = setting.get("engine", DEFAULT_ENGINE)
+        if not isinstance(engine, str) or engine not in AGENT_EFFORTS:
             problems.append("%s.engine must be one of %s" % (label, list(AGENT_EFFORTS)))
             continue
         model = setting.get("model")
@@ -271,19 +271,22 @@ def check_manifest(manifest, ws, problems):
         if unit.get("kind") not in UNIT_KINDS:
             problems.append("%s.kind is invalid" % label)
         files = unit.get("files")
-        if not isinstance(files, list) or not files or any(not isinstance(path, str) or not path.strip() for path in files) or len(files) != len(set(files or [])):
+        if not unique_strings(files) or not files or any(not path.strip() for path in files):
             problems.append("%s.files must be a non-empty unique string array" % label)
+        elif not all(inside_workspace(path) for path in files):
+            problems.append("%s.files must be relative paths inside the workspace" % label)
         platforms = unit.get("platforms")
-        if not isinstance(platforms, list) or not platforms or len(platforms) != len(set(platforms or [])) or any(p not in UI_PLATFORMS for p in platforms):
+        if not unique_strings(platforms) or not platforms or any(p not in UI_PLATFORMS for p in platforms):
             problems.append("%s.platforms contains an invalid platform" % label)
         hints = unit.get("platformHints")
-        if hints is not None and (not isinstance(hints, list) or len(hints) != len(set(hints or [])) or any(p not in UI_PLATFORMS for p in hints)):
+        if hints is not None and (not unique_strings(hints) or any(p not in UI_PLATFORMS for p in hints)):
             problems.append("%s.platformHints contains an invalid platform" % label)
         depends = unit.get("dependsOn", [])
-        if not isinstance(depends, list) or len(depends) != len(set(depends or [])) or any(not isinstance(dep, str) or not dep.strip() for dep in depends):
+        if not unique_strings(depends) or any(not dep.strip() for dep in depends):
             problems.append("%s.dependsOn must be a unique string array" % label)
             depends = []
-        dependencies[unit_id] = depends
+        if isinstance(unit_id, str):
+            dependencies[unit_id] = depends
         for dep in depends:
             if dep == unit_id:
                 problems.append("unit %s has a self dependency" % unit_id)
@@ -291,7 +294,7 @@ def check_manifest(manifest, ws, problems):
                 problems.append("unit %s dependsOn missing unit %s" % (unit_id, dep))
         check_token_values(unit, "manifest unit %s" % unit_id, problems)
     # Every step of the fixed order must exist, or an older manifest silently skips one (e.g. reuse-analysis).
-    kinds = {unit.get("kind") for unit in units if isinstance(unit, dict)}
+    kinds = {unit.get("kind") for unit in units if isinstance(unit, dict) and isinstance(unit.get("kind"), str)}
     for kind in UNIT_KINDS:
         if kind not in kinds:
             problems.append("src/ui/ir/manifest.json: manifest is missing unit kind %s" % kind)
@@ -397,10 +400,11 @@ def latest_unit_reviews(records):
 def unit_output_hash(ws, unit):
     """sha256 over the unit's declared output files, or None when one is missing."""
     digest = hashlib.sha256()
-    for relative in unit.get("files", []) if isinstance(unit, dict) else []:
-        path = Path(ws) / relative
-        if not isinstance(relative, str) or not path.is_file():
+    files = unit.get("files") if isinstance(unit, dict) else None
+    for relative in files if isinstance(files, list) else []:
+        if not inside_workspace(relative) or not (Path(ws) / relative).is_file():
             return None
+        path = Path(ws) / relative
         digest.update(relative.encode("utf-8") + b"\0" + path.read_bytes() + b"\0")
     return "sha256:" + digest.hexdigest()
 
@@ -427,27 +431,25 @@ def unsatisfied_dependencies(ws, manifest, status_by_id, latest_reviews, unit):
     return missing
 
 
-def check_approvals(ws, phase, release, problems):
-    records = load_json(ws, "project/approvals.json", problems)
-    if records is None:
-        return {}, {}
-    if not isinstance(records, list):
-        problems.append("project/approvals.json: must be a list of gate or unit-review records")
-        records = []
+def latest_gate_states(records, problems):
+    """The state each gate's latest record decides. Only a well-formed approved record counts as approved;
+    a malformed record still withdraws the gate it names. The workbench reads gates through this too."""
     latest_gates = {}
-    for i, record in enumerate(records):
+    for i, record in enumerate(records if isinstance(records, list) else []):
         if not isinstance(record, dict):
             problems.append("approval #%d: needs gate in %s" % (i, GATES))
             continue
         kind = record.get("kind")
         if kind == "unit-review":
-            check_unit_review(record, i, problems)
-            continue
-        if kind not in (None, "gate"):
-            problems.append("approval #%d: kind must be gate or unit-review" % i)
             continue
         gate = record.get("gate")
-        if not isinstance(gate, str) or gate not in GATES:
+        named = gate if isinstance(gate, str) and gate in GATES else None
+        if kind not in (None, "gate"):
+            problems.append("approval #%d: kind must be gate or unit-review" % i)
+            if named:
+                latest_gates[named] = "invalid"
+            continue
+        if named is None:
             problems.append("approval #%d: needs gate in %s" % (i, GATES))
             continue
         state = record.get("status")
@@ -462,6 +464,20 @@ def check_approvals(ws, phase, release, problems):
                 problems.append("approval #%d (%s): approved without %s" % (i, gate, ", ".join(missing)))
                 state = "invalid"
         latest_gates[gate] = state
+    return latest_gates
+
+
+def check_approvals(ws, phase, release, problems):
+    records = load_json(ws, "project/approvals.json", problems)
+    if records is None:
+        return {}, {}
+    if not isinstance(records, list):
+        problems.append("project/approvals.json: must be a list of gate or unit-review records")
+        records = []
+    for i, record in enumerate(records):
+        if isinstance(record, dict) and record.get("kind") == "unit-review":
+            check_unit_review(record, i, problems)
+    latest_gates = latest_gate_states(records, problems)
     needed = CONTRACT["phases"][str(phase)]["requiresApprovals"] + (CONTRACT["releaseApprovals"] if release else [])
     for gate in needed:
         if latest_gates.get(gate) != "approved":
@@ -470,8 +486,9 @@ def check_approvals(ws, phase, release, problems):
 
 
 def output_exists(ws, unit):
-    files = unit.get("files", []) if isinstance(unit, dict) else []
-    return bool(files) and all((ws / path).is_file() and (ws / path).stat().st_size > 0 for path in files)
+    files = unit.get("files") if isinstance(unit, dict) else None
+    return isinstance(files, list) and bool(files) and all(
+        inside_workspace(path) and (ws / path).is_file() and (ws / path).stat().st_size > 0 for path in files)
 
 
 def review_matches(review, manifest):
@@ -479,16 +496,17 @@ def review_matches(review, manifest):
 
 
 def check_units(ws, phase, status, manifest, latest_reviews, problems):
-    if manifest is None or not isinstance(status, dict) or phase < 4:
+    if not isinstance(manifest, dict) or not isinstance(manifest.get("units"), list) or not isinstance(status, dict) or phase < 4:
         return
     units = status.get("units")
     if not isinstance(units, list):
         problems.append("project/status.json: units are required when the UI manifest is present")
         return
+    # check_manifest already reported units whose files are malformed; reading those files here would crash.
     manifest_units = {
         unit.get("id"): unit
-        for unit in manifest.get("units", [])
-        if isinstance(unit, dict) and present(unit, "id")
+        for unit in manifest["units"]
+        if isinstance(unit, dict) and present(unit, "id") and unique_strings(unit.get("files")) and all(inside_workspace(p) for p in unit["files"])
     }
     for review_id, review in latest_reviews.items():
         if review_id not in manifest_units:
@@ -525,11 +543,13 @@ def check_units(ws, phase, status, manifest, latest_reviews, problems):
             problems.append("unit %s: in-progress requires approved dependencies" % unit_id)
         if state == "in-review" and not output_exists(ws, unit):
             problems.append("unit %s: in-review requires output" % unit_id)
-        review = latest_reviews.get(unit_id)
-        if state == "approved" and not review_current(ws, review, manifest, unit):
-            problems.append("unit %s: %s requires an approved unit-review matching the latest manifest and output" % (unit_id, state))
+        # Every unit, not only those marked approved: a regenerated last unit has no downstream unit to re-check it.
         if unit_id not in latest_reviews:
             problems.append("unit %s requires unit-review" % unit_id)
+        elif not review_current(ws, latest_reviews[unit_id], manifest, unit):
+            problems.append("unit %s: %s requires an approved unit-review matching the latest manifest and output" % (unit_id, state))
+        elif state != "approved":
+            problems.append("unit %s: %s must be approved to complete the phase" % (unit_id, state))
 
 
 def check(ws, phase, release=False):
@@ -548,9 +568,7 @@ def check(ws, phase, release=False):
         check_ui_config(ui, brief, problems)
     manifest = load_json(ws, "src/ui/ir/manifest.json", problems) if (ws / "src/ui/ir/manifest.json").is_file() else None
     if phase >= 4 and manifest is not None:
-        manifest_units = check_manifest(manifest, ws, problems)
-    else:
-        manifest_units = None
+        check_manifest(manifest, ws, problems)
     status = check_status(ws, phase, problems) if (ws / "project/status.json").is_file() else None
     _, latest_reviews = check_approvals(ws, phase, release, problems) if (ws / "project/approvals.json").is_file() else ({}, {})
     check_units(ws, phase, status, manifest, latest_reviews, problems)

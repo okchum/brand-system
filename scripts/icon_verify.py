@@ -19,6 +19,13 @@ ICNS_SIZES = {
 }
 
 
+def png_size(blob):
+    """Pixel size from an embedded PNG's IHDR, or None when the blob is not a PNG (e.g. BMP or JPEG 2000)."""
+    if blob.startswith(PNG_SIG) and len(blob) >= 24 and blob[12:16] == b"IHDR":
+        return struct.unpack(">II", blob[16:24])
+    return None
+
+
 def sniff(data):
     if data.startswith(PNG_SIG):
         if len(data) < 24 or data[12:16] != b"IHDR":
@@ -60,12 +67,15 @@ def sniff(data):
             if size == 0 or offset < data_start or offset + size > len(data):
                 errors.append("image %d does not point at image data inside the file" % i)
             sizes.append((w or 256, h or 256))
+            actual = png_size(data[offset:offset + size])
+            if actual and actual != sizes[-1]:
+                errors.append("image %d declares %dx%d but its PNG is %dx%d" % ((i,) + sizes[-1] + actual))
         return "ico", sizes, errors
     if data[:4] == b"icns":
         declared = struct.unpack(">I", data[4:8])[0] if len(data) >= 8 else -1
         if declared != len(data):
             return "icns", [], ["declared length %d != file size %d" % (declared, len(data))]
-        sizes, pos, count = [], 8, 0
+        sizes, pos, count, errors = [], 8, 0, []
         while pos < len(data):
             kind, length = data[pos:pos + 4], struct.unpack(">I", data[pos + 4:pos + 8].rjust(4, b"\0"))[0]
             if length < 8 or pos + length > len(data):
@@ -74,8 +84,11 @@ def sniff(data):
                 if length == 8:
                     return "icns", sizes, ["element %r at offset %d is empty" % (kind, pos)]
                 sizes.append((ICNS_SIZES[kind], ICNS_SIZES[kind]))
+                actual = png_size(data[pos + 8:pos + length])
+                if actual and actual != sizes[-1]:
+                    errors.append("element %r declares %dx%d but its PNG is %dx%d" % ((kind,) + sizes[-1] + actual))
             pos, count = pos + length, count + 1
-        return "icns", sizes, [] if count else ["ICNS contains no elements"]
+        return "icns", sizes, errors if count else ["ICNS contains no elements"]
     return "unknown", [], []
 
 

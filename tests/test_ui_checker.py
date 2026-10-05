@@ -187,6 +187,32 @@ class UiCheckerTest(unittest.TestCase):
         output.write_text("<main>edited</main>\n", encoding="utf-8")
         self.assert_finding(check_workspace.check(root, 4), "unit map: approved requires an approved unit-review matching the latest manifest and output")
 
+    def test_regenerated_unit_without_downstream_still_needs_current_review(self):
+        status = {"phase": 4, "blockers": [], "units": [{"unitId": "map", "status": "in-review"}]}
+        root = self.make_workspace(status=status)
+        output = root / "src/ui/map.html"
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_text("<main>map</main>\n", encoding="utf-8")
+        digest = check_workspace.unit_output_hash(root, self.valid_manifest()["units"][0])
+        (root / "project/approvals.json").write_text(json.dumps([self.approved_review("map", output_hash=digest)]), encoding="utf-8")
+        self.assert_finding(check_workspace.check(root, 4), "unit map: in-review must be approved")
+        output.write_text("<main>regenerated</main>\n", encoding="utf-8")
+        self.assert_finding(check_workspace.check(root, 4), "unit map: in-review requires an approved unit-review matching")
+
+    def test_malformed_values_are_reported_not_crashed_on(self):
+        manifest = self.valid_manifest()
+        manifest["units"][0]["platforms"] = [["web"]]
+        manifest["units"][0]["kind"] = {"x": 1}
+        manifest["units"][1]["dependsOn"] = [{"x": 1}]
+        manifest["units"][1]["files"] = ["../../etc/passwd"]
+        ui = self.valid_ui()
+        ui["platforms"] = [{"x": 1}]
+        ui["agents"] = {"review": {"engine": ["codex"]}}
+        findings = self.findings(ui=ui, manifest=manifest, status={"phase": 4, "blockers": [], "units": []})
+        for text in ("platforms contains an invalid platform", "kind is invalid", "dependsOn must be a unique string array",
+                     "files must be relative paths inside the workspace", "agents.review.engine"):
+            self.assert_finding(findings, text)
+
     def test_unit_review_record_requires_output_hash_and_named_reviewer(self):
         review = self.approved_review("map")
         review.pop("outputHash")
