@@ -437,6 +437,7 @@ def _init_workspace(path, official, one_liner, source_path, capabilities, stack_
         brief["product"]["oneLiner"] = one_liner or None
         brief["product"]["capabilities"] = capabilities or []
         brief["name"]["final"] = bool(official)
+        brief["constraints"]["frontend"].update(platforms=list(selected_platforms), stackProfile=stack_profile)
         (path / "brand.brief.json").write_text(json.dumps(brief, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     files = {
         "README.md": "# Brand workspace\n\nManaged by brand-system workbench.\n",

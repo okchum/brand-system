@@ -60,6 +60,9 @@ class UiIntegrationTest(unittest.TestCase):
                     workspace = self.init_workspace(root, stack=stack, platforms=list(platforms))
                     self.assertTrue((workspace / "config/ui.json").is_file())
                     self.assertEqual(self.read(workspace, "config/ui.json")["platforms"], list(platforms))
+                    frontend = self.read(workspace, "brand.brief.json")["constraints"]["frontend"]
+                    self.assertEqual((frontend["platforms"], frontend["stackProfile"]), (list(platforms), stack))
+                    self.assertEqual(check_workspace.check(workspace, 0), [])
         with tempfile.TemporaryDirectory() as root:
             for kwargs in ({"stack": "vue"}, {"platforms": ["mobile"]}, {"platforms": []}, {"platforms": ["web", "web"]}):
                 with self.subTest(kwargs=kwargs):
