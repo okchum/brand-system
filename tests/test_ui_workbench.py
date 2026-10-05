@@ -842,6 +842,35 @@ class UiWorkbenchRobustnessTest(unittest.TestCase):
             self.assertEqual((workspace / "project/approvals.json").read_text(encoding="utf-8"), "[]")
             shutil.rmtree(Path(re.search(r"保存到 (.+)）", reported[0]).group(1)).parents[1])
 
+    def test_restore_does_not_write_through_a_swapped_root(self):
+        with tempfile.TemporaryDirectory() as root, tempfile.TemporaryDirectory() as elsewhere:
+            workspace = Path(root)
+            (workspace / "project/sub").mkdir(parents=True)
+            (workspace / "project/top.txt").write_text("mine", encoding="utf-8")
+            (workspace / "project/sub/a.txt").write_text("a", encoding="utf-8")
+            (Path(elsewhere) / "top.txt").write_text("outside", encoding="utf-8")
+            before = workbench._snapshot(workspace, ("project",))
+            shutil.rmtree(workspace / "project")
+            (workspace / "project").symlink_to(elsewhere)
+            workbench._restore(workspace, ("project",), before)
+            self.assertEqual((Path(elsewhere) / "top.txt").read_text(encoding="utf-8"), "outside")
+            self.assertFalse((Path(elsewhere) / "sub").exists())
+            self.assertFalse((workspace / "project").is_symlink())
+            self.assertEqual((workspace / "project/sub/a.txt").read_text(encoding="utf-8"), "a")
+
+    def test_restore_brings_back_an_existing_symlink_as_a_symlink(self):
+        with tempfile.TemporaryDirectory() as root:
+            workspace = Path(root)
+            (workspace / "project").mkdir()
+            (workspace / "project/top.txt").write_text("mine", encoding="utf-8")
+            (workspace / "project/ln").symlink_to("top.txt")
+            before = workbench._snapshot(workspace, ("project",))
+            (workspace / "project/ln").unlink()
+            (workspace / "project/ln").write_text("replaced", encoding="utf-8")
+            workbench._restore(workspace, ("project",), before)
+            self.assertTrue((workspace / "project/ln").is_symlink())
+            self.assertEqual(os.readlink(workspace / "project/ln"), "top.txt")
+
     def test_restore_keeps_a_copy_of_what_it_overwrites(self):
         with tempfile.TemporaryDirectory() as root:
             workspace = Path(root)
@@ -1010,7 +1039,8 @@ class UiWorkbenchHttpTest(unittest.TestCase):
         self.set_phase(3)
         for body in ({"gate": "G1", "choice": "B"}, {"gate": "G2"}):
             self.assertEqual(self.call("/api/approve", dict(body, path=str(self.workspace)))[0], 200)
-        self.assertEqual(self.call("/api/approve", {"path": str(self.workspace), "gate": "G1", "status": "changes-requested"})[0], 200)
+        code, payload = self.call("/api/approve", {"path": str(self.workspace), "gate": "G1", "status": "changes-requested"})
+        self.assertEqual((code, payload["withdrawn"]), (200, ["G1", "G2"]))
         self.call("/api/approve", {"path": str(self.workspace), "gate": "G1", "choice": "A"})
         self.assertEqual(workbench._missing_gates(self.workspace, 3), ["G2"])
 

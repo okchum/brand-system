@@ -19,6 +19,7 @@ import threading
 import time
 import subprocess
 import selectors
+import shutil
 import signal
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -852,19 +853,20 @@ PHASE_PROTECTED_ROOTS = ("project/approvals.json", "src/ui/ir", "src/ui/units")
 
 
 def _snapshot(path, roots, excluded=None):
+    """Bytes of every file under the protected roots; a symlink is recorded as ("symlink", its target), never followed,
+    so a job that swaps a file or a whole root for a link to somewhere else is seen as a change."""
     files = {}
     for root in roots:
         base = path / root
-        items = [base] if base.is_file() else base.rglob("*") if base.is_dir() else []
+        items = [base] if base.is_file() or base.is_symlink() else base.rglob("*") if base.is_dir() else []
         for item in items:
             if excluded and item.is_relative_to(excluded):
                 continue
-            # A job could swap a protected file for a link to a file outside the workspace; the restore below
-            # must replace the link, not write through it.
+            rel = str(item.relative_to(path))
             if item.is_symlink():
-                files[str(item.relative_to(path))] = b"symlink -> " + os.fsencode(os.readlink(item))
+                files[rel] = ("symlink", os.readlink(item))
             elif item.is_file():
-                files[str(item.relative_to(path))] = item.read_bytes()
+                files[rel] = item.read_bytes()
     return files
 
 
@@ -875,17 +877,32 @@ def _restore(path, roots, before, excluded=None):
     changed = sorted(rel for rel in set(before) | set(after) if before.get(rel) != after.get(rel))
     backup = Path(tempfile.mkdtemp(prefix="brand-system-restore-")) if any(rel in after for rel in changed) else None
     reported = []
+    # Copy everything out before touching anything: removing a replaced directory below also removes its files.
     for rel in changed:
+        if rel not in after:
+            reported.append(rel)
+            continue
+        link = isinstance(after[rel], tuple)
+        kept = backup / (rel + ".symlink.txt" if link else rel)
+        kept.parent.mkdir(parents=True, exist_ok=True)
+        kept.write_bytes(os.fsencode(after[rel][1]) if link else after[rel])
+        reported.append("%s（改动后的版本已保存到 %s）" % (rel, kept))
+    root = path.resolve()
+    for rel in changed:  # sorted, so a swapped parent is removed before its children are written back
         target = path / rel
-        if rel in after:
-            (backup / rel).parent.mkdir(parents=True, exist_ok=True)
-            (backup / rel).write_bytes(after[rel])
-        if target.is_symlink() or rel not in before:
+        if target.is_symlink() or target.is_file():
             target.unlink()
-        if rel in before:
-            target.parent.mkdir(parents=True, exist_ok=True)
+        elif target.is_dir():
+            shutil.rmtree(target)
+        if rel not in before:
+            continue
+        target.parent.mkdir(parents=True, exist_ok=True)
+        if not target.parent.resolve().is_relative_to(root):
+            raise RuntimeError("%s 的上级目录指向工作区以外，没有恢复" % rel)
+        if isinstance(before[rel], tuple):
+            os.symlink(before[rel][1], target)
+        else:
             target.write_bytes(before[rel])
-        reported.append("%s（改动后的版本已保存到 %s）" % (rel, backup / rel) if rel in after else rel)
     return reported
 
 
@@ -1292,8 +1309,8 @@ class Handler(BaseHTTPRequestHandler):
                             body.get("summary"),
                         )
                     return self.send_json({"ok": True, "record": record})
-                record_gate(path, body.get("gate"), body.get("choice"), body.get("status", APPROVED))
-                return self.send_json({"ok": True, "gate": body.get("gate")})
+                withdrawn = record_gate(path, body.get("gate"), body.get("choice"), body.get("status", APPROVED))
+                return self.send_json({"ok": True, "gate": body.get("gate"), "withdrawn": withdrawn or []})
             if endpoint == "/api/generate":
                 unit_id = body.get("unitId")
                 phase = int(body.get("phase", 1))
