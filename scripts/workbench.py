@@ -849,15 +849,21 @@ def _unit_feedback(path, unit_id):
     return "".join(line + "。" for line in lines)
 
 
+def _token_rule(path):
+    names = re.findall(r"(--[A-Za-z0-9_-]+):", token_css(path))
+    return ("工作台预览时会把 tokens/src 展开成 CSS 变量注入页面 <head>：变量名是 JSON 路径用 - 连接，保留键名大小写，"
+            "值里的 {a.b} 引用变成 var(--a-b)。实际注入的变量（区分大小写）：" + ("、".join(names) or "无") + "。")
+
+
 def _unit_prompt(path, unit, choice):
     ui = _read_json(path / "config/ui.json", {})
     units = {item["id"]: item for item in _read_json(path / "src/ui/ir/manifest.json").get("units", [])}
     inputs = "、".join(file for dep in unit.get("dependsOn", []) for file in units.get(dep, {}).get("files", [])) or "无"
-    return f"""只完成 UI unit「{unit['id']}」（类型 {unit.get('kind')}），把页面写到 {'、'.join(unit['files'])}。只写入 {unit_dir(unit['id'])}/ 目录；不要修改 project/、config/、src/ui/ir/、tokens/ 以及其他 unit 的目录。读取 src/ui/ir/manifest.json、config/ui.json、brand.brief.json、tokens/src/，以及依赖 unit 的输出：{inputs}。按 {ROOT / "references/ui.md"} 中该类型的要求完成（该文件只读）；颜色、字号、间距只引用 tokens/src 的 token，不复制数值。工作台预览时会把 tokens/src 展开成 CSS 变量注入页面 <head>：变量名是 JSON 路径用 - 连接（color.light.canvas → var(--color-light-canvas)，space.4 → var(--space-4)），值里的 {{a.b}} 引用变成 var(--a-b)。页面只写 var(--…)，不要 fetch token 文件，不要重新声明这些变量或内联数值。目标平台：{'、'.join(ui.get('platforms', []))}；技术栈：{ui.get('stackProfile', '')}；Desktop 与 Mobile 以 Web preview 呈现，同时写清平台语义，方便转换为 native 代码。品牌方向为 Direction {choice}。{_unit_feedback(path, unit['id'])}不要只解释，直接创建文件。"""
+    return f"""只完成 UI unit「{unit['id']}」（类型 {unit.get('kind')}），把页面写到 {'、'.join(unit['files'])}。只写入 {unit_dir(unit['id'])}/ 目录；不要修改 project/、config/、src/ui/ir/、tokens/ 以及其他 unit 的目录。读取 src/ui/ir/manifest.json、config/ui.json、brand.brief.json、tokens/src/，以及依赖 unit 的输出：{inputs}。按 {ROOT / "references/ui.md"} 中该类型的要求完成（该文件只读）；颜色、字号、间距只引用 tokens/src 的 token，不复制数值。{_token_rule(path)}页面只写 var(--…)，不要 fetch token 文件，不要重新声明这些变量或内联数值。目标平台：{'、'.join(ui.get('platforms', []))}；技术栈：{ui.get('stackProfile', '')}；Desktop 与 Mobile 以 Web preview 呈现，同时写清平台语义，方便转换为 native 代码。品牌方向为 Direction {choice}。{_unit_feedback(path, unit['id'])}不要只解释，直接创建文件。"""
 
 
-def _review_prompt(unit):
-    return f"""你是独立审查者，只读不写。审查 UI unit「{unit['id']}」（类型 {unit.get('kind')}）的输出 {'、'.join(unit['files'])}。对照 {ROOT / "references/ui.md"}、{ROOT / "references/accessibility.md"}、src/ui/ir/manifest.json 中该 unit 的 platforms 与 dependsOn、tokens/src/，以及依赖 unit 的输出。检查：是否满足该类型的职责，组件是否复用而不是重复造，状态（hover、focus-visible、disabled、loading、invalid、空、错误）是否齐全，颜色与间距是否只引用 token（工作台预览时会把 tokens/src 展开成 CSS 变量注入页面 <head>：变量名是 JSON 路径用 - 连接（color.light.canvas → var(--color-light-canvas)，space.4 → var(--space-4)），值里的 {{a.b}} 引用变成 var(--a-b)。页面引用的每个变量都应能在 tokens/src 找到；页面不需要也不应自己加载 token），平台语义是否写清，可访问性。每个问题给出严重度 P0–P3、位置和具体问题。metadata.json 里的 outputHash 与 manifestHash 由工作台按自己的算法计算和绑定，不要自行核对或把它们列为问题。只有没有 P0/P1 时结论才是 approved，否则是 changes-requested。"""
+def _review_prompt(path, unit):
+    return f"""你是独立审查者，只读不写。审查 UI unit「{unit['id']}」（类型 {unit.get('kind')}）的输出 {'、'.join(unit['files'])}。对照 {ROOT / "references/ui.md"}、{ROOT / "references/accessibility.md"}、src/ui/ir/manifest.json 中该 unit 的 platforms 与 dependsOn、tokens/src/，以及依赖 unit 的输出。检查：是否满足该类型的职责，组件是否复用而不是重复造，状态（hover、focus-visible、disabled、loading、invalid、空、错误）是否齐全，颜色与间距是否只引用 token（{_token_rule(path)}页面引用的变量都应在这份列表里；页面不需要也不应自己加载 token），平台语义是否写清，可访问性。每个问题给出严重度 P0–P3、位置和具体问题。metadata.json 里的 outputHash 与 manifestHash 由工作台按自己的算法计算和绑定，不要自行核对或把它们列为问题。只有没有 P0/P1 时结论才是 approved，否则是 changes-requested。"""
 
 
 # Paths a unit job may not change outside its own unit directory.
@@ -1100,7 +1106,7 @@ def _review_unit(job_id, path, unit_id):
     if verdict_path.exists():
         verdict_path.unlink()
     _job_log(job_id, "正在启动独立审查进程（%s，只读）…" % setting["engine"], "审查 unit %s" % unit_id)
-    code, claude_data = _run_agent_command(_agent_command(path, setting, _review_prompt(unit), verdict_path=verdict_path), path, setting)
+    code, claude_data = _run_agent_command(_agent_command(path, setting, _review_prompt(path, unit), verdict_path=verdict_path), path, setting)
     if code != 0:
         raise RuntimeError("审查进程退出码 %d" % code)
     if claude_data is not None:

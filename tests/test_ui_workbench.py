@@ -1132,6 +1132,14 @@ class UiWorkbenchHttpTest(unittest.TestCase):
         self.assertNotIn("bad", css)
         self.assertNotIn("<", css)
 
+    def test_unit_prompts_list_the_injected_variable_names(self):
+        # A real generator guessed --font-family-body for fontFamily.body; it must not have to guess.
+        self.write_tokens()
+        unit = {"id": "page-map", "kind": "page-map", "files": ["src/ui/units/page-map/output.html"]}
+        for prompt in (workbench._unit_prompt(self.workspace, unit, "A"), workbench._review_prompt(self.workspace, unit)):
+            self.assertIn("--color-light-canvas", prompt)
+            self.assertIn("--space-4", prompt)
+
     def test_preview_injects_tokens_into_unit_pages_only(self):
         self.write_tokens()
         for relative in ("src/ui/units/page-map/output.html", "review/page.html"):
