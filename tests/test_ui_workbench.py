@@ -549,14 +549,28 @@ class UiWorkbenchTest(unittest.TestCase):
     def test_unit_overview_reports_blockers_and_actions(self):
         with tempfile.TemporaryDirectory() as root:
             workspace = self.phase_four(root)
-            units = {item["id"]: item for item in workbench.unit_overview(workspace)}
+            overview = workbench.unit_overview(workspace)
+            units = {item["id"]: item for item in overview["units"]}
+            self.assertEqual(overview["phaseBlocker"], "")
+            self.assertEqual(overview["currentUnit"], "page-map")
             self.assertTrue(units["page-map"]["canGenerate"])
             self.assertFalse(units["layout"]["canGenerate"])
             self.assertEqual(units["layout"]["blockedBy"], ["page-map"])
-            self.review(workspace, "page-map")
-            units = {item["id"]: item for item in workbench.unit_overview(workspace)}
+            self.assertNotIn("phaseBlocker", units["page-map"])
+            write_output(workspace, "page-map")
+            workbench.begin_unit_generation(workspace, "page-map")
+            workbench.mark_unit_in_review(workspace, "page-map")
+            workbench.append_unit_review(
+                workspace, "page-map", "approved", reviewer=REVIEWER, evidence=["review.json", "detail"],
+                file_scope=[{"path": workbench.unit_output_path("page-map"), "startLine": 1, "endLine": 1}],
+                output_hash=current_output_hash(workspace, "page-map"), summary="Every page has a clear job",
+            )
+            overview = workbench.unit_overview(workspace)
+            units = {item["id"]: item for item in overview["units"]}
+            self.assertEqual(overview["currentUnit"], "layout")
             self.assertTrue(units["layout"]["canGenerate"])
             self.assertEqual(units["page-map"]["review"]["conclusion"], "approved")
+            self.assertEqual(units["page-map"]["review"]["summary"], "Every page has a clear job")
 
 
 class UiWorkbenchScriptTest(unittest.TestCase):
@@ -632,8 +646,9 @@ class UiWorkbenchHttpTest(unittest.TestCase):
     def test_state_exposes_unit_overview(self):
         code, payload = self.call("/api/state?path=" + str(self.workspace))
         self.assertEqual(code, 200)
-        self.assertEqual([item["id"] for item in payload["uiUnits"]][0], "page-map")
-        self.assertFalse(payload["uiUnits"][0]["canGenerate"])
+        self.assertEqual([item["id"] for item in payload["uiUnits"]["units"]][0], "page-map")
+        self.assertFalse(payload["uiUnits"]["units"][0]["canGenerate"])
+        self.assertIn("Phase 4", payload["uiUnits"]["phaseBlocker"])
 
     def test_unit_generation_and_review_endpoints_enforce_phase_four(self):
         code, payload = self.call("/api/generate", {"path": str(self.workspace), "phase": 0, "unitId": "page-map"})
