@@ -38,7 +38,7 @@
       "additionalProperties": false
     },
     "unitKind": {
-      "enum": ["page-map", "layout", "component", "page", "platform-adaptation"]
+      "enum": ["page-map", "layout", "reuse-analysis", "component", "page", "platform-adaptation"]
     },
     "unitStatus": {
       "enum": ["not-started", "in-progress", "in-review", "approved", "changes-requested", "completed"]

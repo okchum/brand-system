@@ -29,9 +29,25 @@
 - `tokenSource`：固定为 `tokens/src`；UI 配置不得复制 token 值。
 - `deliveryStatus`：只能是 `preview-only` 或 `handoff-ready`。没有可验证工具链时不得声称 native runtime 已实现。
 
-`src/ui/ir/manifest.json` 是页面和组件工作单元的唯一清单，必须包含 `manifestVersion`、`hash` 和 `units`。每个 unit 必须包含 `id`、`kind`、`status`、`files`、`platforms`；`kind` 只能使用 `page-map`、`layout`、`component`、`page`、`platform-adaptation`。`status` 只能是 `not-started`、`in-progress`、`in-review`、`approved`、`changes-requested`、`completed`。
+`src/ui/ir/manifest.json` 是页面和组件工作单元的唯一清单，必须包含 `manifestVersion`、`hash` 和 `units`。每个 unit 必须包含 `id`、`kind`、`status`、`files`、`platforms`；`kind` 只能使用 `page-map`、`layout`、`reuse-analysis`、`component`、`page`、`platform-adaptation`。`status` 只能是 `not-started`、`in-progress`、`in-review`、`approved`、`changes-requested`、`completed`。
 
-工作顺序固定为：页面地图 → 布局 → 复用 → 组件 → 页面 → 平台适配；复用是组件设计前的强制步骤，不单独增加 unit kind。每个 unit 都必须启动独立 subagent review；审阅记录写入 `project/approvals.json` 的 `kind=unit-review`，不能用一次总评替代逐单元记录。
+工作顺序固定为：页面地图 → 布局 → 复用分析 → 组件 → 页面 → 平台适配。复用分析是独立的 unit，组件 unit 依赖它，所以组件必须按复用结论来做，不能边做边临时决定。每个 unit 都必须启动独立 subagent review；审阅记录写入 `project/approvals.json` 的 `kind=unit-review`，不能用一次总评替代逐单元记录。
+
+每种 unit 的产出（都写在该 unit 的 `output.html`，可在 Web preview 中打开）：
+
+- `page-map`：全部页面及其用途、入口与跳转关系、每个页面服务的用户任务；标出哪些页面只在部分平台出现。
+- `layout`：每个页面的布局骨架与槽位（导航、内容区、侧栏、操作区等），以及各平台下的布局差异（Web 断点、Desktop 窗口、iOS/Android 安全区与导航）。
+- `reuse-analysis`：一张组件清单，逐项写出：
+  - 组件名称；
+  - 出现在哪些页面、哪个布局槽位；
+  - 结论：合并成一个共享组件，还是保持各自独立，并给出理由（职责相同、只差内容 → 共享；交互或数据语义不同 → 独立）；
+  - 共享组件需要的变体与状态；
+  - 引用的 token 名。
+
+  不得把只是外观相似、语义不同的元素合并成一个组件。
+- `component`：按复用分析的结论实现共享组件与必要的独立组件，覆盖本文件列出的交互状态；颜色、字号、间距只引用 token。
+- `page`：用已有组件拼出各页面，不新造复用分析里没有的组件；确需新增时先写明理由。
+- `platform-adaptation`：Desktop、iOS、Android 相对 Web 的差异与平台语义说明，用 Web preview 呈现，写清转换为 native 代码时的对应关系。
 
 依赖只认 manifest 每个 unit 的 `dependsOn`：初始化按上面的顺序写入，之后工作台生成与 checker 都读同一份。`files` 在初始化时就写定为 `src/ui/units/<unitId>/output.html`，之后不再改写：hash 覆盖 `files`，推进过程中再填写会让所有已绑定的 review 失效。
 

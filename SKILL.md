@@ -164,7 +164,7 @@ description: 为一个软件产品建立生产导向的完整品牌系统仓库�
 
 产品 UI 的约束新增 `constraints.frontend`，平台只能是 `web`、`desktop`、`ios`、`android`；旧的 `constraints.techStack` 继续可读。初始 stack profile 只有 `html-css-js` 和 `react`，没有工具链时 delivery status 只能是 `preview-only` 或 `handoff-ready`，不能声称 native runtime 已实现。`tokens/src/` 是唯一 token SSOT。
 
-UI 工作单元在 Phase 4 按页面地图 → 布局 → 复用 → 组件 → 页面 → 平台适配推进；每个 unit 必须经过独立 subagent review。工作台的“生成并审查”会在生成后自动另起一个只读的审查进程并记录结论；不用工作台时，由主 agent 派独立 subagent 审查，再通过 `POST /api/approve`（`kind=unit-review`，带被审查输出的 `outputHash`）记录。推进规则见 `references/ui.md` 的“unit 推进规则”。当前模型为 GPT 时，审查 subagent 只能继承当前模型，不得调用 sonnet、opus、fable、haiku 等 Claude 模型；记录 reviewer 名称即可，不在契约中加入模型选择字段。
+UI 工作单元在 Phase 4 按页面地图 → 布局 → 复用分析 → 组件 → 页面 → 平台适配推进，复用分析决定哪些元素做成共享组件、组件 unit 按它实现；每个 unit 必须经过独立 subagent review。工作台的“生成并审查”会在生成后自动另起一个只读的审查进程并记录结论；不用工作台时，由主 agent 派独立 subagent 审查，再通过 `POST /api/approve`（`kind=unit-review`，带被审查输出的 `outputHash`）记录。推进规则见 `references/ui.md` 的“unit 推进规则”。当前模型为 GPT 时，审查 subagent 只能继承当前模型，不得调用 sonnet、opus、fable、haiku 等 Claude 模型；记录 reviewer 名称即可，不在契约中加入模型选择字段。
 
 ---
 

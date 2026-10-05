@@ -99,10 +99,10 @@ class UiWorkbenchTest(unittest.TestCase):
             self.assertRegex(manifest["hash"], r"^sha256:[0-9a-f]{64}$")
             self.assertEqual(
                 [unit["kind"] for unit in manifest["units"]],
-                ["page-map", "layout", "component", "page", "platform-adaptation"],
+                ["page-map", "layout", "reuse-analysis", "component", "page", "platform-adaptation"],
             )
-            self.assertEqual([unit["status"] for unit in manifest["units"]], ["not-started"] * 5)
-            self.assertEqual([unit["status"] for unit in status["units"]], ["not-started"] * 5)
+            self.assertEqual([unit["status"] for unit in manifest["units"]], ["not-started"] * 6)
+            self.assertEqual([unit["status"] for unit in status["units"]], ["not-started"] * 6)
             self.assertEqual(
                 [unit["unitId"] for unit in status["units"]],
                 [unit["id"] for unit in manifest["units"]],
@@ -222,6 +222,9 @@ class UiWorkbenchTest(unittest.TestCase):
             workspace = self.init(root)
             first = self.review(workspace, "page-map")
             self.review(workspace, "layout")
+            with self.assertRaisesRegex(ValueError, "reuse-analysis"):
+                workbench.begin_unit_generation(workspace, "component")
+            self.review(workspace, "reuse-analysis")
             self.assertEqual(first["manifestHash"], self.read(root, "src/ui/ir/manifest.json")["hash"])
             workbench.begin_unit_generation(workspace, "component")
 
@@ -237,6 +240,8 @@ class UiWorkbenchTest(unittest.TestCase):
             workspace = self.init(root)
             manifest = self.read(root, "src/ui/ir/manifest.json")
             self.assertEqual(manifest["units"][1]["dependsOn"], ["page-map"])
+            component = next(unit for unit in manifest["units"] if unit["id"] == "component")
+            self.assertEqual(component["dependsOn"], ["reuse-analysis"])
             manifest["units"][1]["dependsOn"] = []
             manifest["units"][0]["dependsOn"] = ["platform-adaptation"]
             (workspace / "src/ui/ir/manifest.json").write_text(json.dumps(manifest), encoding="utf-8")

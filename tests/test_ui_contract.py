@@ -67,7 +67,7 @@ class UiContractTest(unittest.TestCase):
         self.assertEqual(manifest["properties"]["units"]["items"], {"$ref": "#/$defs/manifestUnit"})
         self.assertEqual(
             self.defs["unitKind"]["enum"],
-            ["page-map", "layout", "component", "page", "platform-adaptation"],
+            ["page-map", "layout", "reuse-analysis", "component", "page", "platform-adaptation"],
         )
         self.assertEqual(
             self.defs["unitStatus"]["enum"],
