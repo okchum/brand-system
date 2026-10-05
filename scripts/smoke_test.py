@@ -42,7 +42,7 @@ def stand_in_codex(cmd, cwd, timeout):
         verdict = {"conclusion": "approved", "summary": "smoke review", "findings": []}
         Path(cmd[cmd.index("-o") + 1]).write_text(json.dumps(verdict), encoding="utf-8")
         return 0
-    relative = re.search(r"src/ui/units/[a-z-]+/output\.html", cmd[-1]).group(0)
+    relative = re.search(r"把页面写到 (src/ui/units/[a-z-]+/output\.html)", cmd[-1]).group(1)
     write_file(Path(cwd), relative, "<main>%s</main>\n" % relative)
     return 0
 
