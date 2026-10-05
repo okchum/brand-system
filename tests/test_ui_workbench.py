@@ -387,10 +387,49 @@ class UiWorkbenchTest(unittest.TestCase):
             self.assertEqual(job["status"], "error")
             self.assertIsNone(workbench._running_job(workspace))
 
+    def test_snapshot_failure_releases_the_job_without_touching_unit_states(self):
+        with tempfile.TemporaryDirectory() as root:
+            workspace = self.phase_four(root)
+            self.review(workspace, "page-map")
+            self.review(workspace, "layout")
             with mock.patch.object(workbench, "_protected_snapshot", side_effect=OSError("unreadable")):
                 with self.assertRaises(OSError):
                     workbench.start_unit_job(workspace, 4, "page-map")
             self.assertIsNone(workbench._running_job(workspace))
+            self.assertEqual(self.unit_status(workspace, "page-map")["status"], "approved")
+            self.assertEqual(self.unit_status(workspace, "layout")["status"], "approved")
+
+    def test_failed_restore_after_timeout_reports_both_problems(self):
+        with tempfile.TemporaryDirectory() as root:
+            workspace = self.phase_four(root)
+
+            def timeout(cmd, cwd, timeout):
+                raise TimeoutError("codex 进程超过 10 分钟未完成")
+            with mock.patch.object(workbench, "_run_codex", side_effect=timeout), \
+                    mock.patch.object(workbench, "_restore_outside_unit", side_effect=PermissionError("approvals.json locked")):
+                job = wait_for(workbench.start_unit_job(workspace, 4, "page-map"))
+            self.assertEqual(job["status"], "error")
+            for needle in ("超过 10 分钟", "approvals.json locked", "可能仍被改动"):
+                self.assertIn(needle, job["error"])
+
+    def test_unit_job_restores_shared_tokens_and_brief(self):
+        with tempfile.TemporaryDirectory() as root:
+            workspace = self.phase_four(root)
+            tokens = workspace / "tokens/src/color.json"
+            tokens.parent.mkdir(parents=True, exist_ok=True)
+            tokens.write_text('{"primary": "#123456"}', encoding="utf-8")
+            brief = (workspace / "brand.brief.json").read_text(encoding="utf-8")
+
+            def rewrite_shared(cmd, cwd, timeout):
+                write_output(cwd, "page-map")
+                (Path(cwd) / "tokens/src/color.json").write_text('{"primary": "#ff0000"}', encoding="utf-8")
+                (Path(cwd) / "brand.brief.json").write_text("{}", encoding="utf-8")
+                return 0
+            with mock.patch.object(workbench, "_run_codex", side_effect=rewrite_shared):
+                job = wait_for(workbench.start_unit_job(workspace, 4, "page-map"))
+            self.assertEqual(job["status"], "error")
+            self.assertEqual(tokens.read_text(encoding="utf-8"), '{"primary": "#123456"}')
+            self.assertEqual((workspace / "brand.brief.json").read_text(encoding="utf-8"), brief)
 
     def test_unit_jobs_get_no_write_access_to_the_skill_repo(self):
         with tempfile.TemporaryDirectory() as root:

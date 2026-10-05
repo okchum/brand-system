@@ -16,6 +16,7 @@ import threading
 import time
 import subprocess
 import selectors
+import signal
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlparse
@@ -482,14 +483,19 @@ def _phase_requirements(phase):
 
 def _run_codex(cmd, cwd, timeout):
     """Run one `codex exec` to completion and return its exit code."""
-    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, cwd=str(cwd))
+    # Own process group, so a timeout also stops the commands codex started before files are compared.
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, cwd=str(cwd), start_new_session=True)
     selector = selectors.DefaultSelector()
     selector.register(proc.stdout, selectors.EVENT_READ)
     deadline = time.time() + timeout
     try:
         while True:
             if time.time() > deadline:
-                proc.kill()
+                try:
+                    os.killpg(proc.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                proc.wait()
                 raise TimeoutError("codex 进程超过 %d 分钟未完成，已停止" % (timeout // 60))
             if selector.select(timeout=1):
                 if not proc.stdout.readline():
@@ -626,7 +632,7 @@ def _review_prompt(unit):
 
 
 # Paths a unit job may not change outside its own unit directory.
-PROTECTED_ROOTS = ("project", "config", "src/ui/ir", "src/ui/units")
+PROTECTED_ROOTS = ("brand.brief.json", "project", "config", "tokens", "src/ui/ir", "src/ui/units")
 
 
 def _protected_snapshot(path, unit_id):
@@ -634,10 +640,10 @@ def _protected_snapshot(path, unit_id):
     files = {}
     for root in PROTECTED_ROOTS:
         base = path / root
-        if base.is_dir():
-            for item in base.rglob("*"):
-                if item.is_file() and not item.is_relative_to(own):
-                    files[str(item.relative_to(path))] = item.read_bytes()
+        items = [base] if base.is_file() else base.rglob("*") if base.is_dir() else []
+        for item in items:
+            if item.is_file() and not item.is_relative_to(own):
+                files[str(item.relative_to(path))] = item.read_bytes()
     return files
 
 
@@ -717,8 +723,12 @@ def start_unit_job(path, phase, unit_id):
     prompt = _unit_prompt(path, unit, choice)
     job_id = _create_job(path, prompt, unit_id)
     try:
-        begin_unit_generation(path, unit_id)
+        # Snapshot first: if it fails nothing has changed yet. begin_unit_generation then rewrites the two
+        # state files itself, and those writes must count as "before" or the restore would undo them.
         before = _protected_snapshot(path, unit_id)
+        begin_unit_generation(path, unit_id)
+        for rel in ("project/status.json", "src/ui/ir/manifest.json"):
+            before[rel] = (path / rel).read_bytes()
     except Exception:
         with JOBS_LOCK:
             JOBS.pop(job_id, None)
@@ -735,7 +745,13 @@ def start_unit_job(path, phase, unit_id):
             except Exception as exc:
                 run_error = exc
             # Restore before reporting anything: a timeout or crash may already have written outside the unit.
-            changed = _restore_outside_unit(path, unit_id, before)
+            try:
+                changed = _restore_outside_unit(path, unit_id, before)
+            except Exception as restore_error:
+                raise RuntimeError(
+                    ("%s；" % run_error if run_error else "")
+                    + "恢复 unit 目录以外的文件时出错，这些文件可能仍被改动：%s" % restore_error
+                )
             if changed:
                 raise RuntimeError(
                     ("%s；" % run_error if run_error else "")
