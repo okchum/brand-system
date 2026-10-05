@@ -1309,6 +1309,7 @@ class Handler(BaseHTTPRequestHandler):
                 payload["manifest"] = _read_json(path / "src/ui/ir/manifest.json", {})
                 payload["uiUnits"] = unit_overview(path)
                 payload["activeJob"] = _active_job(path)
+                payload["gates"] = check_workspace.latest_gate_states(_read_json(path / "project/approvals.json", []), [])
                 return self.send_json(payload)
             if parsed.path == "/api/job":
                 job_id = q.get("id", [""])[0]

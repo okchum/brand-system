@@ -1146,6 +1146,14 @@ class UiWorkbenchHttpTest(unittest.TestCase):
         self.assertFalse(payload["uiUnits"]["units"][0]["canGenerate"])
         self.assertIn("Phase 4", payload["uiUnits"]["phaseBlocker"])
 
+    def test_state_exposes_latest_gate_states(self):
+        # The page hides the backfill button once a gate is approved; it needs the checker's verdict to do that.
+        code, payload = self.call("/api/state?path=" + str(self.workspace))
+        self.assertEqual((code, payload["gates"]), (200, {}))
+        (self.workspace / "project/approvals.json").write_text(json.dumps([G1_APPROVED]), encoding="utf-8")
+        code, payload = self.call("/api/state?path=" + str(self.workspace))
+        self.assertEqual(payload["gates"], {"G1": "approved"})
+
     def test_unit_generation_and_review_endpoints_enforce_phase_four(self):
         code, payload = self.call("/api/generate", {"path": str(self.workspace), "phase": 0, "unitId": "page-map"})
         self.assertEqual(code, 400)
