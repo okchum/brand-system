@@ -7,6 +7,7 @@ import argparse
 import copy
 import json
 import os
+import sys
 import threading
 import time
 import subprocess
@@ -499,9 +500,15 @@ def start_generation(path, phase, unit_id=None):
                     mark_unit_in_review(path, unit_id, [unit_output_path(unit_id)])
                     add_log("unit %s 已进入 in-review，等待外部 subagent review。" % unit_id, "等待 unit review")
                 add_log("正在运行检查和文件验证…", "运行 Phase %d 检查" % phase)
-                check = subprocess.run(["python3", str(ROOT / "scripts/check_workspace.py"), str(path), "--phase", str(phase)], capture_output=True, text=True)
+                check = subprocess.run([sys.executable, str(ROOT / "scripts/check_workspace.py"), str(path), "--phase", str(phase)], capture_output=True, text=True)
                 result = (check.stdout + check.stderr).strip()
                 add_log("检查结果：" + (result or "无输出"))
+                if check.returncode != 0:
+                    with JOBS_LOCK:
+                        JOBS[job_id]["status"] = "error"
+                        JOBS[job_id]["error"] = "Phase %d 检查未通过：%s" % (phase, result or "无输出")
+                    add_log("生成完成但检查未通过。", "检查未通过")
+                    return
                 with JOBS_LOCK:
                     JOBS[job_id]["status"] = "done"
                 add_log("生成任务已完成，正在等待页面检查。", "等待页面检查")

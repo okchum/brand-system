@@ -250,6 +250,30 @@ class UiWorkbenchTest(unittest.TestCase):
                         file_scope=[{"path": path, "startLine": 1, "endLine": 1}],
                     )
 
+    def test_failed_checker_marks_generation_job_as_error(self):
+        import os
+        import subprocess
+        import time
+        with tempfile.TemporaryDirectory() as root:
+            workspace = self.init(root)
+            read_fd, write_fd = os.pipe()
+            os.close(write_fd)
+            stdout = os.fdopen(read_fd)
+            proc = mock.Mock(stdout=stdout)
+            proc.wait.return_value = 0
+            proc.poll.return_value = 0
+            failed = subprocess.CompletedProcess([], 1, "missing review/01-directions.html", "")
+            with mock.patch.object(workbench.subprocess, "Popen", return_value=proc), \
+                    mock.patch.object(workbench.subprocess, "run", return_value=failed):
+                job_id = workbench.start_generation(workspace, 1)
+                deadline = time.time() + 5
+                while workbench.JOBS[job_id]["status"] == "running" and time.time() < deadline:
+                    time.sleep(0.05)
+            stdout.close()
+            job = workbench.JOBS[job_id]
+            self.assertEqual(job["status"], "error")
+            self.assertIn("missing review/01-directions.html", job["error"])
+
 
 if __name__ == "__main__":
     unittest.main()
