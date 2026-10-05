@@ -408,6 +408,33 @@ class CheckWorkspaceTest(Mentions, unittest.TestCase):
     def test_example_brief_matches_schema(self):
         self.assertEqual(validate_brief.validate_file(ROOT / "evals/example-brief.json"), [])
 
+    def test_validator_enforces_every_keyword_the_schema_uses(self):
+        schema = json.loads((ROOT / "assets/brief.schema.json").read_text(encoding="utf-8"))
+
+        def errors(definition, value):
+            return validate_brief.validate(value, {"$ref": "#/$defs/" + definition}, root=schema)
+
+        ui = {"version": "1", "platforms": ["web"], "stackProfile": "react", "tokenSource": "tokens/src", "deliveryStatus": "preview-only"}
+        self.assertEqual(errors("uiConfig", ui), [])
+        for change, needle in (
+            ({"version": ""}, "too short"),
+            ({"platforms": []}, "too few items"),
+            ({"tokenSource": "tokens"}, "must be"),
+        ):
+            with self.subTest(change):
+                self.assertTrue(any(needle in e for e in errors("uiConfig", dict(ui, **change))), errors("uiConfig", dict(ui, **change)))
+        self.assertTrue(any("pattern" in e for e in errors("irManifest", {"manifestVersion": "1", "hash": "md5:1", "units": [
+            {"id": "a", "kind": "layout", "files": ["x"], "platforms": ["web"]}]})))
+        scope = {"path": "a", "startLine": 0, "endLine": 1}
+        self.assertTrue(any("minimum" in e for e in errors("fileRange", scope)))
+        self.assertTrue(any("integer" in e for e in errors("fileRange", dict(scope, startLine=True))))
+        gate = {"kind": "gate", "gate": "G1", "status": "approved", "scope": "s", "snapshot": "s", "confirmation": "c", "approvedAt": "t", "version": "v"}
+        self.assertEqual(errors("approvalRecord", gate), [])
+        self.assertTrue(errors("approvalRecord", dict(gate, gate="G9")))
+        no_version = {k: v for k, v in gate.items() if k != "version"}
+        self.assertTrue(any("anyOf" in e for e in errors("gateApproval", no_version)))
+        self.assertTrue(any("oneOf" in e for e in errors("approvalRecord", no_version)))
+
     def test_directions_contract_requires_three_distinct_metadata_blocks(self):
         self.assertEqual(directions_check.check(ROOT / "evals/directions.fixture.html"), [])
 
