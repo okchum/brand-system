@@ -199,6 +199,16 @@ class UiCheckerTest(unittest.TestCase):
         output.write_text("<main>regenerated</main>\n", encoding="utf-8")
         self.assert_finding(check_workspace.check(root, 4), "unit map: in-review requires an approved unit-review matching")
 
+    def test_unit_file_symlinked_outside_the_workspace_does_not_count(self):
+        root = self.make_workspace()
+        outside = Path(tempfile.mkdtemp()) / "page.html"
+        outside.write_text("<main>elsewhere</main>", encoding="utf-8")
+        (root / "src/ui").mkdir(parents=True, exist_ok=True)
+        (root / "src/ui/map.html").symlink_to(outside)
+        unit = self.valid_manifest()["units"][0]
+        self.assertIsNone(check_workspace.unit_output_hash(root, unit))
+        self.assertFalse(check_workspace.output_exists(root, unit))
+
     def test_malformed_values_are_reported_not_crashed_on(self):
         manifest = self.valid_manifest()
         manifest["units"][0]["platforms"] = [["web"]]

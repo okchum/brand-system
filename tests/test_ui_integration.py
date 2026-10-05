@@ -48,7 +48,7 @@ class UiIntegrationTest(unittest.TestCase):
             self.assertEqual(ui["platforms"], ["web", "desktop"])
             self.assertEqual(ui["deliveryStatus"], "preview-only")
             self.assertRegex(manifest["hash"], r"^sha256:[0-9a-f]{64}$")
-            self.assertEqual([unit["kind"] for unit in manifest["units"]], list(workbench.UI_UNIT_KINDS))
+            self.assertEqual([unit["kind"] for unit in manifest["units"]], list(check_workspace.UNIT_KINDS))
             self.assertEqual([unit["status"] for unit in status["units"]], ["not-started"] * 6)
             self.assertEqual([unit["unitId"] for unit in status["units"]], [unit["id"] for unit in manifest["units"]])
             self.assertEqual(check_workspace.check(workspace, 0), [])

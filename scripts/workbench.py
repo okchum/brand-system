@@ -37,8 +37,12 @@ AGENT_TIMEOUT = 600
 
 
 def page_html():
-    # The effort choices come from the checker's table, so the page offers exactly what validation accepts.
-    return HTML.replace("__AGENT_EFFORTS__", json.dumps({engine: list(levels) for engine, levels in check_workspace.AGENT_EFFORTS.items()}))
+    # Choices come from the checker's tables, so the page offers exactly what validation accepts.
+    contract = {
+        "stacks": check_workspace.STACK_PROFILES, "platforms": check_workspace.UI_PLATFORMS,
+        "defaultEngine": check_workspace.DEFAULT_ENGINE, "recordableGates": list(GATE_SPECS),
+    }
+    return HTML.replace("__AGENT_EFFORTS__", json.dumps({engine: list(levels) for engine, levels in check_workspace.AGENT_EFFORTS.items()})).replace("__UI_CONTRACT__", json.dumps(contract))
 
 
 def is_workspace(path):
@@ -83,9 +87,6 @@ def candidates(root):
     return items
 
 
-UI_STACKS = check_workspace.STACK_PROFILES
-UI_PLATFORMS = check_workspace.UI_PLATFORMS
-UI_UNIT_KINDS = check_workspace.UNIT_KINDS
 # Seeds dependsOn in a new manifest; generation and the checker both read the manifest afterwards.
 UI_UNIT_DEPENDENCIES = {
     "page-map": (),
@@ -119,9 +120,9 @@ def _write_json(path, payload):
 
 
 def _validate_ui_selection(stack_profile, platforms):
-    if stack_profile not in UI_STACKS:
+    if stack_profile not in check_workspace.STACK_PROFILES:
         raise ValueError("未知 stack profile")
-    if not isinstance(platforms, list) or not platforms or any(platform not in UI_PLATFORMS for platform in platforms):
+    if not isinstance(platforms, list) or not platforms or any(platform not in check_workspace.UI_PLATFORMS for platform in platforms):
         raise ValueError("platform 必须是 web、desktop、ios 或 android，且至少选择一个")
     if len(set(platforms)) != len(platforms):
         raise ValueError("platform 不能重复")
@@ -151,7 +152,7 @@ def _manifest_payload(stack_profile, platforms):
                 "platforms": list(platforms),
                 "dependsOn": list(UI_UNIT_DEPENDENCIES[kind]),
             }
-            for kind in UI_UNIT_KINDS
+            for kind in check_workspace.UNIT_KINDS
         ],
     }
 
@@ -405,7 +406,7 @@ def _normalize_agents(agents):
     return cleaned
 
 
-def init_workspace(path, official, one_liner, source_path=None, capabilities=None, stack_profile=UI_STACKS[0], platforms=None, agents=None):
+def init_workspace(path, official, one_liner, source_path=None, capabilities=None, stack_profile=check_workspace.STACK_PROFILES[0], platforms=None, agents=None):
     path = Path(path).expanduser().resolve()
     with STATE_LOCK:
         _refuse_while_running(path)
@@ -465,7 +466,7 @@ def _init_workspace(path, official, one_liner, source_path, capabilities, stack_
     else:
         status = {"phase": 0, "state": "draft", "completed": [], "next": ["complete brief", "generate directions"], "blockers": []}
     if "units" not in status:
-        status["units"] = [{"unitId": kind, "status": NOT_STARTED} for kind in UI_UNIT_KINDS]
+        status["units"] = [{"unitId": kind, "status": NOT_STARTED} for kind in check_workspace.UNIT_KINDS]
     _write_json(status_path, status)
     approvals_path = path / "project/approvals.json"
     if not approvals_path.exists():
@@ -540,7 +541,16 @@ def _run_agent(cmd, cwd, timeout, output_path=None):
                 if not data:
                     break
                 chunks.append(data)
-            elif proc.poll() is not None:
+            # Checked on every pass: a background child that keeps printing must not hide the leader's exit.
+            if proc.poll() is not None:
+                # The last lines (Claude's result JSON) may still be in the pipe; a child that keeps printing
+                # would keep it readable forever, so draining stops after a short grace period.
+                grace = time.time() + 1
+                while time.time() < grace and selector.select(timeout=0.2):
+                    data = os.read(proc.stdout.fileno(), 65536)
+                    if not data:
+                        break
+                    chunks.append(data)
                 break
         try:
             code = proc.wait(timeout=max(0.1, deadline - time.time()))
@@ -690,12 +700,17 @@ def _withdraw_gate(path, gate):
         _refuse_while_running(path)
         approvals_path = path / "project/approvals.json"
         records = _read_json(approvals_path, [])
-        records.append({
-            "kind": "gate", "gate": gate, "status": CHANGES_REQUESTED, "scope": GATE_SPECS[gate][1],
-            "confirmation": "用户在工作台撤回 %s，要求修改" % gate,
-            "requestedAt": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-        })
+        latest = check_workspace.latest_gate_states(records, [])
+        # Later gates were approved on top of this one (G2 builds on the G1 direction), so they are withdrawn too.
+        withdrawn = [gate] + [later for later in GATE_SPECS if later > gate and latest.get(later) == APPROVED]
+        for name in withdrawn:
+            records.append({
+                "kind": "gate", "gate": name, "status": CHANGES_REQUESTED, "scope": GATE_SPECS[name][1],
+                "confirmation": "用户在工作台撤回 %s，要求修改" % gate,
+                "requestedAt": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            })
         _write_json(approvals_path, records)
+        return withdrawn
 
 
 def advance_phase(path, from_phase):
@@ -842,7 +857,13 @@ def _snapshot(path, roots, excluded=None):
         base = path / root
         items = [base] if base.is_file() else base.rglob("*") if base.is_dir() else []
         for item in items:
-            if item.is_file() and not (excluded and item.is_relative_to(excluded)):
+            if excluded and item.is_relative_to(excluded):
+                continue
+            # A job could swap a protected file for a link to a file outside the workspace; the restore below
+            # must replace the link, not write through it.
+            if item.is_symlink():
+                files[str(item.relative_to(path))] = b"symlink -> " + os.fsencode(os.readlink(item))
+            elif item.is_file():
                 files[str(item.relative_to(path))] = item.read_bytes()
     return files
 
@@ -859,11 +880,11 @@ def _restore(path, roots, before, excluded=None):
         if rel in after:
             (backup / rel).parent.mkdir(parents=True, exist_ok=True)
             (backup / rel).write_bytes(after[rel])
+        if target.is_symlink() or rel not in before:
+            target.unlink()
         if rel in before:
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_bytes(before[rel])
-        else:
-            target.unlink()
         reported.append("%s（改动后的版本已保存到 %s）" % (rel, backup / rel) if rel in after else rel)
     return reported
 
@@ -1216,7 +1237,7 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_body(target.read_bytes(), content_type, extra_headers=(
                     ("Content-Security-Policy", "sandbox allow-scripts allow-popups"), ("X-Content-Type-Options", "nosniff")))
             if parsed.path == "/api/scan":
-                target = Path(q["path"][0]).expanduser().resolve() if q.get("path") else self.root
+                target = (self.root / Path(q["path"][0]).expanduser()).resolve() if q.get("path") else self.root
                 if not target.is_dir(): raise ValueError("指定路径不是可读取的文件夹")
                 if not target.is_relative_to(self.root.parent): raise ValueError("为安全起见，请指定启动目录或其父目录下的文件夹")
                 return self.send_json({"root": str(target), "items": candidates(target), "fileCount": count_files(target), "recommended": str(recommended_folder(target))})
@@ -1253,7 +1274,7 @@ class Handler(BaseHTTPRequestHandler):
             if not isinstance(body, dict):
                 raise ValueError("请求体必须是 JSON 对象")
             if endpoint == "/api/init":
-                path = init_workspace(self.workspace_path(body.get("path") or DEFAULT_WORKSPACE_DIR), body.get("official", ""), body.get("oneLiner", ""), body.get("sourcePath") or None, body.get("capabilities") or [], body.get("stackProfile", UI_STACKS[0]), body.get("platforms"), body.get("agents"))
+                path = init_workspace(self.workspace_path(body.get("path") or DEFAULT_WORKSPACE_DIR), body.get("official", ""), body.get("oneLiner", ""), body.get("sourcePath") or None, body.get("capabilities") or [], body.get("stackProfile", check_workspace.STACK_PROFILES[0]), body.get("platforms"), body.get("agents"))
                 return self.send_json({"path": str(path)})
             path = self.workspace_path(body.get("path", ""))
             if endpoint == "/api/approve":
@@ -1299,7 +1320,8 @@ def main(argv=None):
     server = ThreadingHTTPServer(("127.0.0.1", args.port), Handler)
     print("Brand System Workbench: http://127.0.0.1:%d/" % args.port, flush=True)
     if threading.current_thread() is threading.main_thread():
-        signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
+        for stop in (signal.SIGTERM, signal.SIGHUP):  # closing the terminal sends SIGHUP
+            signal.signal(stop, lambda *_: sys.exit(0))
     try:
         server.serve_forever()
     except KeyboardInterrupt:

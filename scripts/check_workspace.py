@@ -76,6 +76,14 @@ def inside_workspace(relative):
     return isinstance(relative, str) and bool(relative.strip()) and not Path(relative).is_absolute() and ".." not in Path(relative).parts
 
 
+def workspace_file(ws, relative):
+    """The file a manifest path names, or None when it is missing or (through a symlink) outside the workspace."""
+    if not inside_workspace(relative):
+        return None
+    path = Path(ws) / relative
+    return path if path.is_file() and path.resolve().is_relative_to(Path(ws).resolve()) else None
+
+
 def check_files(ws, phase, problems):
     required = list(sum((REQUIRED[p] for p in range(phase + 1)), []))
     required.extend(contract_files(phase))
@@ -407,9 +415,9 @@ def unit_output_hash(ws, unit):
     digest = hashlib.sha256()
     files = unit.get("files") if isinstance(unit, dict) else None
     for relative in files if isinstance(files, list) else []:
-        if not inside_workspace(relative) or not (Path(ws) / relative).is_file():
+        path = workspace_file(ws, relative)
+        if path is None:
             return None
-        path = Path(ws) / relative
         digest.update(relative.encode("utf-8") + b"\0" + path.read_bytes() + b"\0")
     return "sha256:" + digest.hexdigest()
 
@@ -493,7 +501,7 @@ def check_approvals(ws, phase, release, problems):
 def output_exists(ws, unit):
     files = unit.get("files") if isinstance(unit, dict) else None
     return isinstance(files, list) and bool(files) and all(
-        inside_workspace(path) and (ws / path).is_file() and (ws / path).stat().st_size > 0 for path in files)
+        workspace_file(ws, path) is not None and (ws / path).stat().st_size > 0 for path in files)
 
 
 def review_matches(review, manifest):

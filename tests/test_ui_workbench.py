@@ -817,6 +817,31 @@ class UiWorkbenchRobustnessTest(unittest.TestCase):
                 self.fail("background sleep %d survived the agent" % pid)
         self.assertEqual(workbench.AGENT_GROUPS, set())
 
+    def test_agent_exit_is_seen_while_a_background_child_keeps_printing(self):
+        with tempfile.TemporaryDirectory() as cwd:
+            output = Path(cwd) / "out.txt"
+            started = time.time()
+            code = workbench._run_agent(["/bin/sh", "-c", "(while :; do echo x; sleep 0.1; done) & echo done; exit 0"], cwd, 10, output_path=output)
+            self.assertEqual(code, 0)
+            self.assertLess(time.time() - started, 5)
+            self.assertIn("done", output.read_text(encoding="utf-8"))
+
+    def test_restore_replaces_a_symlink_instead_of_writing_through_it(self):
+        with tempfile.TemporaryDirectory() as root, tempfile.TemporaryDirectory() as elsewhere:
+            workspace = Path(root)
+            (workspace / "project").mkdir()
+            (workspace / "project/approvals.json").write_text("[]", encoding="utf-8")
+            outside = Path(elsewhere) / "dotfile"
+            outside.write_text("keep me", encoding="utf-8")
+            before = workbench._snapshot(workspace, ("project",))
+            (workspace / "project/approvals.json").unlink()
+            (workspace / "project/approvals.json").symlink_to(outside)
+            reported = workbench._restore(workspace, ("project",), before)
+            self.assertEqual(outside.read_text(encoding="utf-8"), "keep me")
+            self.assertFalse((workspace / "project/approvals.json").is_symlink())
+            self.assertEqual((workspace / "project/approvals.json").read_text(encoding="utf-8"), "[]")
+            shutil.rmtree(Path(re.search(r"保存到 (.+)）", reported[0]).group(1)).parents[1])
+
     def test_restore_keeps_a_copy_of_what_it_overwrites(self):
         with tempfile.TemporaryDirectory() as root:
             workspace = Path(root)
@@ -863,6 +888,15 @@ class WorkbenchPageTest(unittest.TestCase):
                 self.assertIn(target.group(1), ids, label)
             else:
                 self.assertRegex(label, r"<(input|select|textarea)\b", "label neither names nor wraps a control: " + label[:80])
+
+    def test_page_gets_its_choices_from_the_checker(self):
+        page = workbench.page_html()
+        self.assertNotIn("__", re.sub(r"__proto__", "", "".join(re.findall(r"const UI=.*?;", page))))
+        for value in check_workspace.STACK_PROFILES + check_workspace.UI_PLATFORMS:
+            self.assertNotIn('<option value="%s"' % value, self.html)
+        # The unit panel sits in the branch of the phase that owns UI units.
+        before_panel = self.html[:self.html.index('id="unitPanel"')]
+        self.assertEqual(re.findall(r"i===(\d)\?", before_panel)[-1], str(workbench.UI_UNIT_PHASE))
 
     def test_phase_log_is_escaped_before_it_reaches_the_page(self):
         self.assertIn("esc(phaseLogs[i].join(", self.html)
@@ -971,6 +1005,14 @@ class UiWorkbenchHttpTest(unittest.TestCase):
         self.assertEqual(code, 200, payload)
         self.assertEqual(workbench._missing_gates(self.workspace, 2), ["G1"])
         self.assertEqual(check_workspace.check(self.workspace, 2).count("phase 2 requires gate G1 approved (latest record decides)"), 1)
+
+    def test_withdrawing_a_gate_withdraws_the_later_ones(self):
+        self.set_phase(3)
+        for body in ({"gate": "G1", "choice": "B"}, {"gate": "G2"}):
+            self.assertEqual(self.call("/api/approve", dict(body, path=str(self.workspace)))[0], 200)
+        self.assertEqual(self.call("/api/approve", {"path": str(self.workspace), "gate": "G1", "status": "changes-requested"})[0], 200)
+        self.call("/api/approve", {"path": str(self.workspace), "gate": "G1", "choice": "A"})
+        self.assertEqual(workbench._missing_gates(self.workspace, 3), ["G2"])
 
     def test_unexpected_errors_are_500_without_internals(self):
         with mock.patch.object(workbench, "unit_overview", side_effect=RuntimeError("secret /internal/path")), \
