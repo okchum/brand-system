@@ -25,7 +25,7 @@ import directions_check
 CONFIG = Path(__file__).resolve().parent.parent / "config/phase_requirements.json"
 CONTRACT = json.loads(CONFIG.read_text(encoding="utf-8"))
 REQUIRED = {int(k): v["required"] for k, v in CONTRACT["phases"].items()}
-GATE_STATES = ("pending", "approved", "changes-requested")
+
 BLOCKER_FIELDS = ("reason", "impact", "owner", "workaround")
 APPROVAL_FIELDS = ("scope", "snapshot", "confirmation", "approvedAt")
 GATES = CONTRACT["gates"]
@@ -36,7 +36,9 @@ STACK_PROFILES = ("html-css-js", "react")
 DELIVERY_STATUSES = ("preview-only", "handoff-ready")
 UNIT_KINDS = ("page-map", "layout", "reuse-analysis", "component", "page", "platform-adaptation")
 UNIT_STATUSES = ("not-started", "in-progress", "in-review", "approved", "changes-requested")
-REVIEW_CONCLUSIONS = ("approved", "changes-requested")
+NOT_STARTED, IN_PROGRESS, IN_REVIEW, APPROVED, CHANGES_REQUESTED = UNIT_STATUSES
+GATE_STATES = ("pending", APPROVED, CHANGES_REQUESTED)
+REVIEW_CONCLUSIONS = (APPROVED, CHANGES_REQUESTED)
 SHA256_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 # A unit id names its directory and Claude Code's write permission, so it must not carry path or glob syntax.
 UNIT_ID_RE = re.compile(r"^[a-z0-9][a-z0-9-]*$")
@@ -45,7 +47,11 @@ AGENT_ROLES = ("generation", "review")
 AGENT_EFFORTS = {"codex": ("low", "medium", "high"), "claude": ("low", "medium", "high", "xhigh", "max")}
 DEFAULT_ENGINE = "codex"
 AGENT_MODEL_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/\[\]-]*$")
-ROOT = Path(__file__).resolve().parents[1]
+# The phases that create config/ui.json and the UI manifest; units are generated and reviewed in the latter.
+UI_CONFIG_PHASE, UI_UNIT_PHASE = (
+    next(entry["phase"] for entry in CONTRACT["uiContract"]["phases"] if rel in entry["creates"])
+    for rel in ("config/ui.json", "src/ui/ir/manifest.json")
+)
 
 
 def load_json(ws, rel, problems):
@@ -361,7 +367,6 @@ def valid_file_scope(value):
 
 
 def check_unit_review(record, index, problems):
-    unit_id = record.get("unitId")
     if not present(record, "unitId"):
         problems.append("approval #%d (unit-review): unitId is required" % index)
     if record.get("status") not in REVIEW_CONCLUSIONS:
@@ -415,7 +420,7 @@ def review_current(ws, review, manifest, unit):
     return (
         digest is not None
         and review_matches(review, manifest)
-        and review.get("conclusion") == "approved"
+        and review.get("conclusion") == APPROVED
         and review.get("outputHash") == digest
     )
 
@@ -424,7 +429,7 @@ def unsatisfied_dependencies(ws, manifest, status_by_id, latest_reviews, unit):
     units = {item.get("id"): item for item in manifest.get("units", []) if isinstance(item, dict)}
     missing = []
     for dep in unit.get("dependsOn", []) if isinstance(unit, dict) else []:
-        if status_by_id.get(dep, "not-started") != "approved" or dep not in units or not review_current(
+        if status_by_id.get(dep, NOT_STARTED) != APPROVED or dep not in units or not review_current(
             ws, latest_reviews.get(dep), manifest, units[dep]
         ):
             missing.append(dep)
@@ -456,7 +461,7 @@ def latest_gate_states(records, problems):
         if state not in GATE_STATES:
             problems.append("approval #%d (%s): status must be one of %s" % (i, gate, list(GATE_STATES)))
             state = "invalid"
-        elif state == "approved":
+        elif state == APPROVED:
             missing = [k for k in APPROVAL_FIELDS if not present(record, k)]
             if not (present(record, "version") or present(record, "hash")):
                 missing.append("version or hash")
@@ -480,7 +485,7 @@ def check_approvals(ws, phase, release, problems):
     latest_gates = latest_gate_states(records, problems)
     needed = CONTRACT["phases"][str(phase)]["requiresApprovals"] + (CONTRACT["releaseApprovals"] if release else [])
     for gate in needed:
-        if latest_gates.get(gate) != "approved":
+        if latest_gates.get(gate) != APPROVED:
             problems.append("phase %d requires gate %s approved (latest record decides)" % (phase, gate))
     return latest_gates, latest_unit_reviews(records)
 
@@ -496,7 +501,7 @@ def review_matches(review, manifest):
 
 
 def check_units(ws, phase, status, manifest, latest_reviews, problems):
-    if not isinstance(manifest, dict) or not isinstance(manifest.get("units"), list) or not isinstance(status, dict) or phase < 4:
+    if not isinstance(manifest, dict) or not isinstance(manifest.get("units"), list) or not isinstance(status, dict) or phase < UI_UNIT_PHASE:
         return
     units = status.get("units")
     if not isinstance(units, list):
@@ -535,20 +540,20 @@ def check_units(ws, phase, status, manifest, latest_reviews, problems):
         status_by_id[unit_id] = item.get("status")
         if item.get("status") not in UNIT_STATUSES:
             problems.append("unit %s has invalid status" % unit_id)
-    if "changes-requested" in status_by_id.values():
+    if CHANGES_REQUESTED in status_by_id.values():
         problems.append("changes-requested blocks phase progression")
     for unit_id, unit in manifest_units.items():
-        state = status_by_id.get(unit_id, "not-started")
-        if state == "in-progress" and unsatisfied_dependencies(ws, manifest, status_by_id, latest_reviews, unit):
+        state = status_by_id.get(unit_id, NOT_STARTED)
+        if state == IN_PROGRESS and unsatisfied_dependencies(ws, manifest, status_by_id, latest_reviews, unit):
             problems.append("unit %s: in-progress requires approved dependencies" % unit_id)
-        if state == "in-review" and not output_exists(ws, unit):
+        if state == IN_REVIEW and not output_exists(ws, unit):
             problems.append("unit %s: in-review requires output" % unit_id)
         # Every unit, not only those marked approved: a regenerated last unit has no downstream unit to re-check it.
         if unit_id not in latest_reviews:
             problems.append("unit %s requires unit-review" % unit_id)
         elif not review_current(ws, latest_reviews[unit_id], manifest, unit):
             problems.append("unit %s: %s requires an approved unit-review matching the latest manifest and output" % (unit_id, state))
-        elif state != "approved":
+        elif state != APPROVED:
             problems.append("unit %s: %s must be approved to complete the phase" % (unit_id, state))
 
 
@@ -564,10 +569,10 @@ def check(ws, phase, release=False):
     if phase >= 1 and review.is_file():
         problems.extend("review/01-directions.html: " + e for e in directions_check.check(review))
     ui = load_json(ws, "config/ui.json", problems) if (ws / "config/ui.json").is_file() else None
-    if phase >= 3 and ui is not None:
+    if phase >= UI_CONFIG_PHASE and ui is not None:
         check_ui_config(ui, brief, problems)
     manifest = load_json(ws, "src/ui/ir/manifest.json", problems) if (ws / "src/ui/ir/manifest.json").is_file() else None
-    if phase >= 4 and manifest is not None:
+    if phase >= UI_UNIT_PHASE and manifest is not None:
         check_manifest(manifest, ws, problems)
     status = check_status(ws, phase, problems) if (ws / "project/status.json").is_file() else None
     _, latest_reviews = check_approvals(ws, phase, release, problems) if (ws / "project/approvals.json").is_file() else ({}, {})

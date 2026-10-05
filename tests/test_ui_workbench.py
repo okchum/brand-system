@@ -1,5 +1,8 @@
+import io
 import json
+import os
 import re
+import shutil
 import subprocess
 import tempfile
 import threading
@@ -728,6 +731,39 @@ class UiWorkbenchTest(unittest.TestCase):
             self.assertFalse(job["check"]["passed"])
             self.assertIn("missing review/01-directions.html", job["check"]["output"])
 
+    def test_phase_job_is_sandboxed_to_the_workspace(self):
+        with tempfile.TemporaryDirectory() as root:
+            workspace = self.at_phase(self.init(root), 1)
+            seen = []
+
+            def capture(cmd, cwd, timeout):
+                seen.append(cmd)
+                return 0
+            with mock.patch.object(workbench, "_run_agent", side_effect=capture), \
+                    mock.patch.object(workbench.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, "", "")):
+                wait_for(workbench.start_generation(workspace, 1))
+            cmd = seen[0]
+            self.assertEqual(cmd[cmd.index("-s") + 1], "workspace-write")
+            self.assertEqual(cmd[cmd.index("-C") + 1], str(workspace))
+            self.assertNotIn("--add-dir", cmd)
+
+    def test_empty_output_is_not_sent_to_review(self):
+        with tempfile.TemporaryDirectory() as root:
+            workspace = self.phase_four(root)
+            write_output(workspace, "page-map", "")
+            workbench.begin_unit_generation(workspace, "page-map")
+            with self.assertRaises(ValueError):
+                workbench.mark_unit_in_review(workspace, "page-map")
+
+    def test_gate_validity_matches_the_checker(self):
+        with tempfile.TemporaryDirectory() as root:
+            workspace = self.init(root)
+            incomplete = {key: value for key, value in G1_APPROVED.items() if key != "confirmation"}
+            (workspace / "project/approvals.json").write_text(json.dumps([incomplete]), encoding="utf-8")
+            self.assertEqual(workbench._missing_gates(workspace, 2), ["G1"])
+            (workspace / "project/approvals.json").write_text(json.dumps([G1_APPROVED, dict(G1_APPROVED, kind="Gate")]), encoding="utf-8")
+            self.assertEqual(workbench._missing_gates(workspace, 2), ["G1"])
+
     def test_unit_overview_reports_blockers_and_actions(self):
         with tempfile.TemporaryDirectory() as root:
             workspace = self.phase_four(root)
@@ -753,6 +789,84 @@ class UiWorkbenchTest(unittest.TestCase):
             self.assertTrue(units["layout"]["canGenerate"])
             self.assertEqual(units["page-map"]["review"]["conclusion"], "approved")
             self.assertEqual(units["page-map"]["review"]["summary"], "Every page has a clear job")
+
+
+class UiWorkbenchRobustnessTest(unittest.TestCase):
+    def test_agent_timeout_holds_while_a_partial_line_is_pending(self):
+        script = "import sys, time; sys.stdout.write('partial'); sys.stdout.flush(); time.sleep(30)"
+        with tempfile.TemporaryDirectory() as cwd:
+            started = time.time()
+            with self.assertRaises(TimeoutError):
+                workbench._run_agent([sys.executable, "-c", script], cwd, 1)
+        self.assertLess(time.time() - started, 10)
+
+    def test_background_commands_stop_with_the_agent(self):
+        with tempfile.TemporaryDirectory() as cwd:
+            output = Path(cwd) / "out.txt"
+            code = workbench._run_agent(["/bin/sh", "-c", "sleep 30 & echo $!"], cwd, 10, output_path=output)
+            self.assertEqual(code, 0)
+            pid = int(output.read_text(encoding="utf-8").strip())
+            deadline = time.time() + 3
+            while time.time() < deadline:
+                try:
+                    os.kill(pid, 0)
+                except ProcessLookupError:
+                    break
+                time.sleep(0.05)
+            else:
+                self.fail("background sleep %d survived the agent" % pid)
+        self.assertEqual(workbench.AGENT_GROUPS, set())
+
+    def test_restore_keeps_a_copy_of_what_it_overwrites(self):
+        with tempfile.TemporaryDirectory() as root:
+            workspace = Path(root)
+            (workspace / "project").mkdir()
+            (workspace / "project/approvals.json").write_text("[]", encoding="utf-8")
+            before = workbench._snapshot(workspace, ("project",))
+            (workspace / "project/approvals.json").write_text('["edited meanwhile"]', encoding="utf-8")
+            [reported] = workbench._restore(workspace, ("project",), before)
+            self.assertEqual((workspace / "project/approvals.json").read_text(encoding="utf-8"), "[]")
+            copy = Path(re.search(r"保存到 (.+)）", reported).group(1))
+            self.assertEqual(copy.read_text(encoding="utf-8"), '["edited meanwhile"]')
+            shutil.rmtree(copy.parents[1])
+
+    def test_file_count_is_capped(self):
+        with tempfile.TemporaryDirectory() as root:
+            for index in range(5):
+                (Path(root) / ("f%d" % index)).write_text("x", encoding="utf-8")
+            with mock.patch.object(workbench, "SCAN_FILE_LIMIT", 3):
+                self.assertEqual(workbench.count_files(Path(root)), "3+ 个可读取文件")
+            self.assertEqual(workbench.count_files(Path(root)), "5 个可读取文件")
+
+
+class WorkbenchPageTest(unittest.TestCase):
+    html = (ROOT / "assets/workbench.html").read_text(encoding="utf-8")
+
+    def test_page_script_parses(self):
+        node = shutil.which("node")
+        if not node:
+            self.skipTest("node is not installed; CI runners have it")
+        scripts = re.findall(r"<script>(.*?)</script>", workbench.page_html(), re.S)
+        self.assertTrue(scripts)
+        with tempfile.TemporaryDirectory() as d:
+            for index, body in enumerate(scripts):
+                path = Path(d) / ("page%d.js" % index)
+                path.write_text(body, encoding="utf-8")
+                result = subprocess.run([node, "--check", str(path)], capture_output=True, text=True)
+                self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_every_label_names_its_control(self):
+        ids = set(re.findall(r'id="([^"]+)"', self.html))
+        for label in re.findall(r"<label\b[^>]*>.*?</label>", self.html, re.S):
+            target = re.match(r'<label[^>]*\bfor="([^"]+)"', label)
+            if target:
+                self.assertIn(target.group(1), ids, label)
+            else:
+                self.assertRegex(label, r"<(input|select|textarea)\b", "label neither names nor wraps a control: " + label[:80])
+
+    def test_phase_log_is_escaped_before_it_reaches_the_page(self):
+        self.assertIn("esc(phaseLogs[i].join(", self.html)
+        self.assertNotIn("'+phaseLogs[i].join(", self.html)
 
 
 class UiWorkbenchScriptTest(unittest.TestCase):
@@ -781,9 +895,9 @@ class UiWorkbenchHttpTest(unittest.TestCase):
         self.server.server_close()
         self.tmp.cleanup()
 
-    def call(self, endpoint, body=None):
+    def call(self, endpoint, body=None, headers=None):
         data = None if body is None else json.dumps(body).encode()
-        request = self.urllib.request.Request(self.base + endpoint, data=data, headers={"Content-Type": "application/json"})
+        request = self.urllib.request.Request(self.base + endpoint, data=data, headers=dict({"Content-Type": "application/json"}, **(headers or {})))
         try:
             with self.urllib.request.urlopen(request) as response:
                 return response.status, json.loads(response.read())
@@ -818,6 +932,53 @@ class UiWorkbenchHttpTest(unittest.TestCase):
             self.assertEqual(payload["activeJob"]["id"], "fake-running")
         finally:
             workbench.JOBS.pop("fake-running", None)
+
+    def test_requests_from_other_sites_are_refused(self):
+        self.set_phase(1)
+        approve = {"path": str(self.workspace), "gate": "G1", "choice": "B"}
+        code, _ = self.call("/api/approve", approve, {"Origin": "http://evil.example"})
+        self.assertEqual(code, 403)
+        self.assertEqual(json.loads((self.workspace / "project/approvals.json").read_text(encoding="utf-8")), [])
+        code, _ = self.call("/api/state?path=" + str(self.workspace), headers={"Host": "evil.example:%d" % self.server.server_address[1]})
+        self.assertEqual(code, 403)
+        code, payload = self.call("/api/approve", approve, {"Origin": self.base})
+        self.assertEqual(code, 200, payload)
+
+    def test_preview_is_sandboxed_and_served_with_its_own_type(self):
+        (self.workspace / "review").mkdir(exist_ok=True)
+        (self.workspace / "review/notes.md").write_text("# <b>notes</b>\n", encoding="utf-8")
+        (self.workspace / "review/page.html").write_text("<main>page</main>", encoding="utf-8")
+        for name, content_type in (("notes.md", "text/plain; charset=utf-8"), ("page.html", "text/html; charset=utf-8")):
+            url = "%s/preview?path=%s&file=review/%s" % (self.base, self.urllib.parse.quote(str(self.workspace)), name)
+            with self.urllib.request.urlopen(url) as response:
+                self.assertEqual(response.headers["Content-Type"], content_type)
+                self.assertIn("sandbox", response.headers["Content-Security-Policy"])
+                self.assertNotIn("allow-same-origin", response.headers["Content-Security-Policy"])
+
+    def test_init_stays_inside_the_startup_directory(self):
+        code, payload = self.call("/api/init", {"path": "../outside", "official": "X", "oneLiner": "x"})
+        self.assertEqual(code, 400)
+        self.assertIn("启动目录", payload["error"])
+        self.assertFalse((self.root.parent / "outside").exists())
+        code, payload = self.call("/api/init", {"path": "third", "official": "X", "oneLiner": "x"})
+        self.assertEqual(code, 200, payload)
+        self.assertEqual(payload["path"], str(self.root / "third"))
+
+    def test_gate_can_be_withdrawn_from_the_page(self):
+        self.set_phase(2)
+        self.assertEqual(self.call("/api/approve", {"path": str(self.workspace), "gate": "G1", "choice": "B"})[0], 200)
+        code, payload = self.call("/api/approve", {"path": str(self.workspace), "gate": "G1", "status": "changes-requested"})
+        self.assertEqual(code, 200, payload)
+        self.assertEqual(workbench._missing_gates(self.workspace, 2), ["G1"])
+        self.assertEqual(check_workspace.check(self.workspace, 2).count("phase 2 requires gate G1 approved (latest record decides)"), 1)
+
+    def test_unexpected_errors_are_500_without_internals(self):
+        with mock.patch.object(workbench, "unit_overview", side_effect=RuntimeError("secret /internal/path")), \
+                mock.patch.object(workbench.sys, "stderr", io.StringIO()) as log:
+            code, payload = self.call("/api/state?path=" + str(self.workspace))
+        self.assertEqual(code, 500)
+        self.assertNotIn("/internal/path", payload["error"])
+        self.assertIn("secret /internal/path", log.getvalue())
 
     def test_advance_requires_the_gates_the_phase_contract_names(self):
         self.set_phase(1)

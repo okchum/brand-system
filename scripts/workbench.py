@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 # Python 3.9 reads a script in fixed-size chunks and rejects a multi-byte character split across a chunk
-# boundary unless the encoding is declared; the embedded page has very long lines of Chinese text.
+# boundary unless the encoding is declared; the agent prompts here are long lines of Chinese text.
 """Run the browser-first brand-system workspace initializer.
 
 Usage: python3 scripts/workbench.py [DIRECTORY] [--port PORT]
@@ -14,6 +14,7 @@ import os
 import re
 import sys
 import tempfile
+import traceback
 import threading
 import time
 import subprocess
@@ -21,65 +22,18 @@ import selectors
 import signal
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 
 import check_workspace
+from check_workspace import APPROVED, CHANGES_REQUESTED, IN_PROGRESS, IN_REVIEW, NOT_STARTED
 
 ROOT = Path(__file__).resolve().parent.parent
 TEMPLATE = ROOT / "assets" / "brief.template.json"
 
-HTML = r'''<!doctype html>
-<html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Brand System Workbench</title>
-<style>
-:root{font:16px/1.5 system-ui,sans-serif;color:#17202a;background:#f5f7fb}body{max-width:980px;margin:0 auto;padding:32px}main{background:#fff;border:1px solid #dfe5ee;border-radius:16px;padding:28px;box-shadow:0 8px 30px #17202a12}.deliverables{margin-top:16px;padding:18px;border:1px solid #cbd8ef;border-radius:12px;background:#f7f9ff}.deliverables h3{margin:0 0 12px}.deliverable-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:10px}.deliverable-card{display:block;padding:12px;border:1px solid #dfe5ee;border-radius:9px;background:#fff;color:#17202a;text-decoration:none}.deliverable-card:hover{border-color:#315efb;background:#f8faff}.deliverable-card strong{display:block;color:#315efb}.deliverable-card small{color:#687386}h1{margin-top:0}label{display:block;margin:14px 0 6px;font-weight:650}input,textarea,select{width:100%;box-sizing:border-box;padding:10px;border:1px solid #c7d0dc;border-radius:8px;font:inherit}input[readonly]{background:#f8fafc}.row{display:flex;gap:10px;align-items:center}.row input{flex:1}.row button{flex:0 0 auto;min-width:110px;margin-top:0;height:46px}button{margin-top:18px;padding:11px 16px;border:0;border-radius:8px;background:#315efb;color:#fff;font-weight:700;cursor:pointer}button:disabled{opacity:.48;cursor:wait}button.secondary{background:#e8edf5;color:#17202a}.card{border:1px solid #dfe5ee;border-radius:10px;padding:16px;margin:12px 0}.muted{color:#687386}.error{color:#a32626}.ok{color:#166534;white-space:pre-wrap}.log,.phase-log{background:#111827;color:#d1fae5;border-radius:10px;padding:14px;min-height:60px;max-height:180px;overflow:auto;white-space:pre-wrap;user-select:text;font:13px/1.55 ui-monospace,monospace}.phase{border:1px solid #dfe5ee;border-radius:10px;margin:12px 0;overflow:hidden}.phase-header{display:block;width:100%;margin:0;border:0;border-radius:0;background:#eef2f7;color:#17202a;text-align:left}.phase.current .phase-header{background:#e8efff;color:#19327a;border-left:4px solid #315efb}.phase.current .phase-header:hover{background:#dce7ff}.phase-header:disabled{cursor:not-allowed;color:#7d8796;background:#f7f8fa}.phase-body{padding:16px;background:#fff}.phase-body[hidden]{display:none}.phase-actions{display:flex;gap:10px;align-items:center;flex-wrap:wrap}.review-link{font-weight:700;color:#315efb}.phase-actions button{margin-top:0}.phase-check{white-space:pre-wrap;margin:10px 0 0;color:#a32626}.phase-check.ok{color:#166534}dialog{border:1px solid #dfe5ee;border-radius:12px;padding:22px;width:min(680px,calc(100% - 44px));box-shadow:0 20px 60px #17202a33}dialog::backdrop{background:#17202a66}.dialog-actions{display:flex;gap:10px;justify-content:flex-end}.dialog-actions button{margin-top:12px}.unit-row{border:1px solid #dfe5ee;border-radius:10px;padding:12px 14px;margin:8px 0}.unit-row h5{margin:0 0 4px;font-size:15px}.unit-row p{margin:4px 0}.unit-actions{display:flex;gap:10px;flex-wrap:wrap;align-items:center}.unit-actions button{margin-top:6px}fieldset.agents{margin:16px 0 0;padding:12px 16px 16px;border:1px solid #dfe5ee;border-radius:10px}fieldset.agents legend{font-weight:650;padding:0 6px}.agent-row{display:grid;grid-template-columns:3em minmax(0,1fr) minmax(0,1.4fr) minmax(0,1fr);gap:10px;align-items:center;margin-top:10px}@media (max-width:640px){.agent-row{grid-template-columns:1fr}}
-</style><body><main><h1>Brand System Workbench</h1><p class="muted">在同一个页面决定生成位置、产品信息，以及 AI 是否读取已有源码或文档。</p><p id="notice" class="error"></p>
-<section id="setup"><h2>初始化品牌工作区</h2><label>生成目录</label><p class="muted">品牌系统文件会写入这里。默认使用 workbench 启动目录，推荐生成到它下面的 <code>brand</code>。</p><div class="row"><input id="outputPath" aria-label="生成目录" readonly><button id="chooseOutputButton" class="secondary">浏览选择</button></div><p id="outputHint" class="muted"></p>
-<label>产品名称</label><input id="official" placeholder="例如 Tidewell"><label>产品功能和一句话描述</label><textarea id="oneLiner" rows="3" placeholder="例如：帮助独立团队管理客户反馈、路线图和发布计划"></textarea><label>主要功能（可选，用逗号分隔）</label><input id="capabilities" placeholder="例如：客户反馈、路线图、发布计划"><label>技术栈</label><select id="stackProfile"><option value="html-css-js">html-css-js</option><option value="react">react</option></select><label>目标平台（可多选）</label><select id="platforms" multiple size="4"><option value="web" selected>web</option><option value="desktop">desktop</option><option value="ios">ios</option><option value="android">android</option></select>
-<fieldset class="agents"><legend>可选：UI 工作单元用哪个 AI</legend><p class="muted">留空就用引擎自己的默认模型和推理强度。推荐生成用 codex、审查用 Claude Code：换一家的模型来审，更容易发现生成模型自己的盲区。各阶段的整体生成始终用 codex 默认配置。</p><div class="agent-row"><b>生成</b><select id="agentGenerationEngine" aria-label="生成引擎"><option value="codex">codex</option><option value="claude">Claude Code</option></select><input id="agentGenerationModel" aria-label="生成模型" placeholder="模型（留空 = 默认）"><select id="agentGenerationEffort" aria-label="生成推理强度"></select></div><div class="agent-row"><b>审查</b><select id="agentReviewEngine" aria-label="审查引擎"><option value="codex">codex</option><option value="claude">Claude Code</option></select><input id="agentReviewModel" aria-label="审查模型" placeholder="模型（留空 = 默认）"><select id="agentReviewEffort" aria-label="审查推理强度"></select></div></fieldset>
-<label>可选：AI 参考资料目录</label><p class="muted">可选择源码、产品文档或设计资料所在目录。它只读，不会成为生成目录，也不会被改写。</p><div class="row"><input id="sourcePath" aria-label="AI 参考资料目录" readonly placeholder="未选择，AI 只使用本次填写的信息"><button id="chooseSourceButton" class="secondary">浏览选择</button></div><p id="sourceHint" class="muted"></p>
-<button id="initButton">创建工作区并打开阶段 0</button><p id="result"></p></section>
-<section id="workspace"><h2>工作区状态</h2><div id="state"><p class="muted">创建或选择工作区后，当前阶段会显示在这里。</p></div><div id="uiContext" class="card" aria-live="polite"><p class="muted">UI unit 状态会显示在这里。</p></div><div id="phases"></div></section></main>
-<dialog id="chooser"><h3 id="chooserTitle">浏览选择目录</h3><p class="muted" id="chooserHelp"></p><select id="chooserList" size="8"></select><div class="dialog-actions"><button id="cancelChooser" class="secondary">取消</button><button id="confirmChooser">选择此目录</button></div></dialog>
-<script>
-let current='',recommended='',items=[],chooserMode='output',activePhase=0,phaseLogs=Array.from({length:6},()=>[]); const $=s=>document.querySelector(s); const dialog=$('#chooser');
-function log(message,phase=activePhase){phaseLogs[phase].push('['+new Date().toLocaleTimeString()+'] '+message);const box=$('#phaseLog-'+phase);if(box){box.textContent=phaseLogs[phase].join('\n');box.scrollTop=box.scrollHeight}}
-async function get(path,opts){let r=await fetch(path,opts);let j=await r.json();if(!r.ok)throw Error(j.error||'请求失败');return j}
-async function scan(path=''){try{log('正在扫描主目录候选…',0);const j=await get('/api/scan'+(path?'?path='+encodeURIComponent(path):''));recommended=j.recommended;items=j.items;$('#outputPath').value=recommended;$('#outputPath').dataset.workspace='false';$('#initButton').textContent='创建工作区并打开阶段 0';renderItems();log('已找到 '+items.length+' 个可选择目录。',0)}catch(e){$('#notice').textContent='工作台连接失败：'+e.message;log('扫描失败：'+e.message,0)}}
-function renderItems(){const list=$('#chooserList');list.replaceChildren();const fresh=document.createElement('option');fresh.value=recommended;fresh.textContent='推荐生成目录：'+recommended;fresh.dataset.workspace='false';list.appendChild(fresh);items.forEach(x=>{const o=document.createElement('option');o.value=x.path;o.textContent=(x.workspace?'已有工作区：':'目录：')+x.path;o.dataset.workspace=String(x.workspace);list.appendChild(o)});$('#outputHint').textContent='生成目录：'+$('#outputPath').value}
-function openChooser(mode){chooserMode=mode;$('#chooserTitle').textContent=mode==='output'?'选择生成目录':'选择 AI 参考资料目录';$('#chooserHelp').textContent=mode==='output'?'默认推荐新建 brand；已有工作区可以直接继续。':'选择启动目录读取源码和文档，或选择它下面的具体目录。';dialog.showModal()}
-function confirmChooser(){const o=$('#chooserList').selectedOptions[0];if(!o)return; if(chooserMode==='output'){const existing=o.dataset.workspace==='true';$('#outputPath').value=o.value;$('#outputPath').dataset.workspace=String(existing);$('#initButton').textContent=existing?'打开已有工作区':'创建工作区并打开阶段 0';$('#outputHint').textContent=existing?'将打开此已有品牌工作区，保留当前阶段和文件。':'品牌系统文件将在此目录创建。'}else{$('#sourcePath').value=o.value;checkSourcePath()}dialog.close()}
-async function checkSourcePath(){const value=$('#sourcePath').value.trim();if(!value){$('#sourceHint').textContent='未选择参考资料目录。';return}try{log('正在读取参考资料目录：'+value,0);const j=await get('/api/scan?path='+encodeURIComponent(value));$('#sourceHint').textContent='已找到 '+j.fileCount+' 个可读取文件，不会写入此目录。';log('参考资料读取准备完成，共 '+j.fileCount+' 个文件。',0)}catch(e){$('#sourceHint').className='error';$('#sourceHint').textContent=e.message;log('参考资料读取失败：'+e.message,0)}}
-function phaseInstruction(phase){return ['先补全 brief、环境、策略和范围文件，再检查进入 Phase 1。','先点击“生成 Phase 1 方向”，查看三套方案后选择 A/B/C，再记录 G1。','先确认 G1；然后点击“生成并检查 Phase 2”，系统会生成 review/02-identity.html、BRAND_SYSTEM.md、config/brand.json 及身份文档。','先查看 Phase 3 系统审阅页并确认 G3，再生成或进入 Phase 4。','先在下方按顺序生成并审查全部 UI 工作单元，再生成 Phase 4 资产、查看审阅页并确认 G4，然后进入 Phase 5。','先生成 Phase 5 发布交付物，再检查最终交付物。'][phase]||'先完成当前阶段标注的交付物，再重新检查。'}
-function updateUrl(phase,replace=false){const u=new URL(location.href);u.searchParams.set('workspace',current);u.searchParams.set('phase',String(phase));(replace?history.replaceState:history.pushState).call(history,{},'',u)}
-async function initWorkspace(){const output=$('#outputPath').value,source=$('#sourcePath').value.trim(),existing=$('#outputPath').dataset.workspace==='true';const capabilities=$('#capabilities').value.split(/[,，]/).map(x=>x.trim()).filter(Boolean);const platforms=Array.from($('#platforms').selectedOptions).map(x=>x.value);try{if(existing){current=output;await loadState();log('已打开已有品牌工作区。',activePhase);return}log('开始初始化，生成目录：'+output,0);if(source)log('将读取参考资料：'+source,0);const j=await get('/api/init',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({path:output,official:$('#official').value,oneLiner:$('#oneLiner').value,capabilities,sourcePath:source,stackProfile:$('#stackProfile').value,platforms,agents:agentSettings()})});current=j.path;updateUrl(0);log('已写入阶段 0 文件。',0);await loadState()}catch(e){$('#result').className='error';$('#result').textContent=e.message;log('初始化失败：'+e.message,0)}}
-function renderPhases(currentPhase){activePhase=currentPhase;const names=['发现与计划','三套方向','品牌身份','设计系统','资产与平台','交付与发布'];const desc=['完善 brief、环境、策略和范围。','生成三套真正不同的方向并准备 G1。','完成 Logo、颜色、字体和身份规范。','完成 tokens、组件和无障碍规范。','按工作单元生成产品界面，再生成平台资产、图标和导出清单。','完成 QA、交接和发布包。'];const box=$('#phases');box.replaceChildren();for(let i=0;i<6;i++){const panel=document.createElement('section');panel.className='phase '+(i===currentPhase?'current':'');const header=document.createElement('button');header.className='phase-header';header.textContent=(i<currentPhase?'✓ ':i===currentPhase?'● ':'🔒 ')+'Phase '+i+' · '+names[i]+' · '+desc[i];header.disabled=i>currentPhase;const body=document.createElement('div');body.className='phase-body';const actions=i===currentPhase&&i<=5?((i===1?'<button id="generateButton">生成 Phase 1 方向</button><div id="reviewGate" hidden><a class="review-link" target="_blank" rel="noopener" href="/preview?path='+encodeURIComponent(current)+'&file=review/01-directions.html">查看三套方向</a><label class="direction-choice">选择方向 <select id="directionChoice"><option value="A">A</option><option value="B">B</option><option value="C">C</option></select></label><button id="approveProgressButton">选择方向并进入 Phase 2</button></div>':'')+(i===2?'<button id="progressButton">生成 Phase 2 身份并检查 → Phase 3</button><div id="reviewGate2" hidden><a class="review-link" target="_blank" rel="noopener" href="/preview?path='+encodeURIComponent(current)+'&file=review/02-identity.html">查看 Phase 2 身份</a><button id="approveG2Button">确认 G2 并进入 Phase 3</button></div>':'')+(i===3?'<button id="progressButton">生成 Phase 3 系统并检查 → Phase 4</button><div id="reviewGate3" hidden><a class="review-link" target="_blank" rel="noopener" href="/preview?path='+encodeURIComponent(current)+'&file=review/03-system.html">查看 Phase 3 系统</a><button id="approveG3Button">确认 G3 并进入 Phase 4</button></div>':'')+(i===4?'<button id="progressButton">生成 Phase 4 资产并检查 → Phase 5</button><div id="reviewGate4" hidden><a class="review-link" target="_blank" rel="noopener" href="/preview?path='+encodeURIComponent(current)+'&file=review/04-assets.html">查看 Phase 4 资产</a><button id="approveG4Button">确认 G4 并进入 Phase 5</button></div><div id="unitPanel" aria-live="polite"></div>':'')+(i===5?'<button id="progressButton">生成 Phase 5 发布包</button><div id="reviewGate5" class="deliverables" hidden><h3>Phase 5 交付物</h3><p class="muted">生成完成后，从这里查看和交接品牌系统。</p><div class="deliverable-grid"><a class="deliverable-card" target="_blank" rel="noopener" href="/preview?path='+encodeURIComponent(current)+'&file=review/05-release.html"><strong>发布审阅页</strong><small>review/05-release.html</small></a><a class="deliverable-card" target="_blank" rel="noopener" href="/preview?path='+encodeURIComponent(current)+'&file=CHANGELOG.md"><strong>变更记录</strong><small>CHANGELOG.md</small></a><a class="deliverable-card" target="_blank" rel="noopener" href="/preview?path='+encodeURIComponent(current)+'&file=docs/handoff-by-role.md"><strong>交接文档</strong><small>docs/handoff-by-role.md</small></a><a class="deliverable-card" target="_blank" rel="noopener" href="/preview?path='+encodeURIComponent(current)+'&file=reports/qa-report.md"><strong>QA 报告</strong><small>reports/qa-report.md</small></a></div></div>':'')+(i===0?'<button id="progressButton">检查并进入 Phase 1</button>':'')+'<pre id="phaseCheck-'+i+'" class="phase-check"></pre>'):'' ;body.innerHTML='<p class="muted">'+(i<currentPhase?'已完成，可点击标题回看。':i===currentPhase?'当前阶段，完成检查后进入下一阶段。':'尚未到达，完成前置阶段后解锁。')+'</p>'+(i>0&&i<=5&&i===currentPhase?'<p id=\"phaseJobStatus\" class=\"muted\" aria-live=\"polite\"></p>':'')+actions+(i===1&&currentPhase>1?'<div class=\"phase-actions\"><label>补录 G1 方向 <select id=\"historyDirectionChoice\"><option value=\"A\">A</option><option value=\"B\">B</option><option value=\"C\">C</option></select></label><button id=\"approveHistoryButton\" class=\"secondary\">记录 G1 并解锁后续生成</button></div>':'')+(i===2&&currentPhase>2?'<div class="phase-actions"><a class="review-link" target="_blank" rel="noopener" href="/preview?path='+encodeURIComponent(current)+'&file=review/02-identity.html">查看 Phase 2 身份</a><button id="approveHistoryG2Button" class="secondary">记录 G2 并解锁后续生成</button></div>':'')+(i===3&&currentPhase>3?'<div class="phase-actions"><a class="review-link" target="_blank" rel="noopener" href="/preview?path='+encodeURIComponent(current)+'&file=review/03-system.html">查看 Phase 3 系统</a><button id="approveHistoryG3Button" class="secondary">记录 G3 并解锁后续生成</button></div>':'')+(i===4&&currentPhase>4?'<div class="phase-actions"><a class="review-link" target="_blank" rel="noopener" href="/preview?path='+encodeURIComponent(current)+'&file=review/04-assets.html">查看 Phase 4 资产</a><button id="approveHistoryG4Button" class="secondary">记录 G4 并解锁后续生成</button></div>':'')+'<h4>Phase '+i+' 活动日志</h4><div id="phaseLog-'+i+'" class="phase-log" aria-live="polite">'+phaseLogs[i].join('\n')+'</div>';if(i!==currentPhase)body.hidden=true;header.addEventListener('click',()=>{if(i<=currentPhase)body.hidden=!body.hidden});panel.append(header,body);box.appendChild(panel)}}
-async function loadState(){if(!current)return;try{const j=await get('/api/state?path='+encodeURIComponent(current));const phase=Number(j.phase);$('#state').innerHTML='<div class="card"><b>'+esc(j.path)+'</b><br>阶段 '+phase+' · '+esc(j.state)+'<br>下一步：'+esc(phaseInstruction(phase))+'</div>';const overview=j.uiUnits||{units:[]};const currentUnit=overview.units.find(x=>x.id===overview.currentUnit);$('#uiContext').innerHTML='<b>UI workflow</b><br>stack: '+esc(j.uiConfig?.stackProfile||'未设置')+' · platform: '+esc((j.uiConfig?.platforms||[]).join(', ')||'未设置')+'<br>'+agentSummary(j.uiConfig?.agents)+'<br>当前 unit: '+(overview.units.length?(currentUnit?esc(UNIT_LABELS[currentUnit.id]||currentUnit.id)+' · '+esc(UNIT_STATUS[currentUnit.status]||currentUnit.status):'全部已通过'):'无');renderPhases(phase);renderUnits(overview);if(j.activeJob&&!activeJob){activeJob=j.activeJob.id;pollErrors=0;activeJobPhase=phase;activeJobUnit=j.activeJob.unitId||'';pollJob()}updateUrl(phase,true);log('当前进度：阶段 '+phase+' · '+j.state,phase)}catch(e){$('#state').textContent=e.message}}
-let activeJob='',activeJobPhase=0,activeJobUnit='',pollErrors=0;
-const AGENT_EFFORTS=__AGENT_EFFORTS__;const ENGINE_LABELS={codex:'codex',claude:'Claude Code'};
-function fillEfforts(role){const engine=$('#agent'+role+'Engine').value,select=$('#agent'+role+'Effort'),keep=select.value;select.replaceChildren(new Option('推理强度：默认',''));for(const level of AGENT_EFFORTS[engine]||[])select.add(new Option(level,level));select.value=(AGENT_EFFORTS[engine]||[]).includes(keep)?keep:''}
-function agentSettings(){const pick=role=>({engine:$('#agent'+role+'Engine').value,model:$('#agent'+role+'Model').value.trim(),reasoningEffort:$('#agent'+role+'Effort').value});return {generation:pick('Generation'),review:pick('Review')}}
-function agentSummary(agents){const part=(label,s)=>label+'：'+esc(ENGINE_LABELS[s?.engine||'codex']||s.engine)+' · '+esc(s?.model||'默认模型')+' · '+esc(s?.reasoningEffort||'默认强度');return part('生成',agents?.generation)+'；'+part('审查',agents?.review)}
-const UNIT_LABELS={'page-map':'页面地图','layout':'布局','reuse-analysis':'复用分析','component':'组件','page':'页面','platform-adaptation':'平台适配'};const UNIT_STATUS={'not-started':'未开始','in-progress':'生成中','in-review':'待审查','approved':'已通过','changes-requested':'需要修改'};
-function renderUnits(overview){const box=$('#unitPanel');const units=overview.units;if(!box||!units.length)return;const blocker=overview.phaseBlocker;box.innerHTML='<h4>UI 工作单元</h4><p class="muted">按依赖顺序逐个生成；每个 unit 生成后由独立的只读审查进程给出结论，通过后才解锁下游。</p>'+(blocker?'<p class="muted">'+esc(blocker)+'</p>':'')+units.map(u=>{const review=u.review?'<p>审查（'+esc(u.review.reviewer||'subagent')+'）：'+esc(UNIT_STATUS[u.review.conclusion]||u.review.conclusion)+(u.review.current?'':' · 输出已变化，结论不再适用')+(u.review.summary?' · '+esc(u.review.summary):'')+'</p>':'';const waiting=u.blockedBy.length?' · 等待：'+u.blockedBy.map(d=>esc(UNIT_LABELS[d]||d)).join('、'):'';const preview=u.outputExists?'<a class="review-link" target="_blank" rel="noopener" href="/preview?path='+encodeURIComponent(current)+'&file='+encodeURIComponent(u.output)+'">查看输出</a>':'';const generate='<button data-unit="'+esc(u.id)+'" data-action="generate"'+(u.canGenerate?'':' disabled')+'>'+(u.status==='not-started'?'生成并审查':'重新生成并审查')+'</button>';const again=u.status==='in-review'?'<button class="secondary" data-unit="'+esc(u.id)+'" data-action="review"'+(u.canReview?'':' disabled')+'>只重新审查</button>':'';return '<div class="unit-row"><h5>'+esc(UNIT_LABELS[u.id]||u.id)+' · '+esc(UNIT_STATUS[u.status]||u.status)+'</h5><p class="muted">依赖：'+(u.dependsOn.length?u.dependsOn.map(d=>esc(UNIT_LABELS[d]||d)).join('、'):'无')+waiting+'</p>'+(u.note?'<p class="error">'+esc(u.note)+'</p>':'')+review+'<div class="unit-actions">'+generate+again+preview+'</div></div>'}).join('');box.onclick=e=>{const b=e.target.closest('button[data-unit]');if(b&&!b.disabled)runUnit(b.dataset.unit,b.dataset.action)}}
-async function runUnit(unitId,action){if(!current||activeJob)return;document.querySelectorAll('#unitPanel button').forEach(b=>b.disabled=true);try{const j=await get(action==='review'?'/api/review':'/api/generate',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({path:current,phase:activePhase,unitId})});activeJob=j.job;pollErrors=0;activeJobPhase=activePhase;activeJobUnit=unitId;log((action==='review'?'开始重新审查 unit ':'开始生成 unit ')+unitId+'。',activePhase);pollJob()}catch(e){log('unit '+unitId+' 无法开始：'+e.message,activePhase);loadState()}}
-async function generatePhase(){if(!current||activePhase<1||activePhase>5)return;const b=$(activePhase===1?'#generateButton':'#progressButton');if(b){b.disabled=true;b.setAttribute('aria-busy','true');b.textContent='正在生成 Phase '+activePhase+'…'}log('正在启动 Phase '+activePhase+' 生成任务…',activePhase);try{const j=await get('/api/generate',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({path:current,phase:activePhase})});activeJob=j.job;pollErrors=0;activeJobPhase=activePhase;pollJob()}catch(e){if(b){b.disabled=false;b.removeAttribute('aria-busy');b.textContent='重新生成 Phase '+activePhase}log('生成启动失败：'+e.message,activePhase)}}
-async function pollJob(){if(!activeJob)return;try{const j=await get('/api/job?id='+encodeURIComponent(activeJob));pollErrors=0;const status=$('#phaseJobStatus');if(status){const age=Math.max(0,Math.round((Date.now()/1000-j.updatedAt)));status.textContent=j.status==='running'?(age>120?'可能无响应：当前步骤 '+(j.step||'处理中')+'，最后更新 '+age+' 秒前':'当前步骤：'+(j.step||'处理中')+' · 最近更新 '+age+' 秒前'):(j.status==='done'?'任务已完成，可以检查。':'任务失败：'+(j.error||'未知错误'))}if(j.logs&&j.logs.length){phaseLogs[activeJobPhase]=j.logs.slice();const box=$('#phaseLog-'+activeJobPhase);if(box){const next=phaseLogs[activeJobPhase].join('\n');const previous=box.textContent;const follow=box.scrollTop+box.clientHeight>=box.scrollHeight-8;if(next!==previous){if(previous&&next.startsWith(previous)){box.append(document.createTextNode(next.slice(previous.length)))}else{box.textContent=next}}if(follow)box.scrollTop=box.scrollHeight}}if(j.status==='running'){setTimeout(pollJob,700);return}if(j.check){const out=$('#phaseCheck-'+activeJobPhase);if(out){out.textContent=(j.check.passed?'Phase '+activeJobPhase+' 检查通过。':'Phase '+activeJobPhase+' 检查未通过（推进前需要处理）：\n'+j.check.output);out.classList.toggle('ok',j.check.passed)}}if(activeJobUnit){log(j.status==='done'?'unit '+activeJobUnit+' 已生成并完成审查。':'unit '+activeJobUnit+' 失败：'+(j.error||'请查看日志。'),activeJobPhase);activeJob='';activeJobUnit='';return loadState()}const b=$(activeJobPhase===1?'#generateButton':'#progressButton');if(b){b.disabled=false;b.removeAttribute('aria-busy');if(j.status!=='done')b.textContent='重新生成 Phase '+activeJobPhase}if(j.status==='done'&&activeJobPhase===1){const gate=$('#reviewGate');if(gate)gate.hidden=false;if(b){b.disabled=true;b.textContent='Phase 1 方向已生成'}}if(j.status==='done'&&activeJobPhase===2){const gate=$('#reviewGate2');if(gate)gate.hidden=false;if(b){b.disabled=true;b.textContent='Phase 2 身份已生成'}}if(j.status==='done'&&activeJobPhase>=3&&activeJobPhase<=4){const gate=$('#reviewGate'+activeJobPhase);if(gate)gate.hidden=false;if(b){b.disabled=true;b.textContent='Phase '+activeJobPhase+' 交付物已生成'}}if(j.status==='done'&&activeJobPhase===5){const gate=$('#reviewGate5');if(gate)gate.hidden=false;if(b){b.textContent='检查 Phase 5 交付物'}}if(j.status==='done'&&activeJobPhase!==1&&activeJobPhase!==5&&b)b.textContent='检查并进入 Phase '+(activeJobPhase+1);if(j.status==='done')log('生成完成，可以查看方案并继续。',activeJobPhase);else log('生成任务失败：'+(j.error||'请查看日志。'),activeJobPhase)}catch(e){if(e.message&&e.message.indexOf('任务不存在')>=0){const b=$(activeJobPhase===1?'#generateButton':'#progressButton');if(b){b.disabled=false;b.removeAttribute('aria-busy');b.textContent='重新生成 Phase '+activeJobPhase}activeJob='';const lostUnit=activeJobUnit;activeJobUnit='';const status=$('#phaseJobStatus');if(status)status.textContent='任务状态已丢失，请重新生成。';log('生成任务状态已丢失，请重新生成。',activeJobPhase);if(lostUnit)loadState()}else if(++pollErrors<=5){log('读取生成进度失败，2 秒后重试：'+e.message,activeJobPhase);setTimeout(pollJob,2000)}else{log('连续 5 次读取进度失败，已停止；工作台恢复后刷新页面即可重新连接任务。',activeJobPhase);activeJob='';activeJobUnit='';pollErrors=0;loadState()}}}
-async function approveHistory(){const choice=$('#historyDirectionChoice')?.value||'A';try{await get('/api/approve',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({path:current,gate:'G1',choice})});log('已补录 G1 审批：选择方向 '+choice+'。',1);const b=$('#approveHistoryButton');if(b)b.disabled=true}catch(e){log('G1 补录失败：'+e.message,1)}}
-async function approveGate(gate){try{await get('/api/approve',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({path:current,gate})});log('已记录 '+gate+' 审批。',Number(gate.slice(1)));return checkWorkspace()}catch(e){log(gate+' 审批失败：'+e.message,Number(gate.slice(1)))}}
-async function approveHistoryGate(gate){try{await get('/api/approve',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({path:current,gate})});log('已补录 '+gate+' 审批。',Number(gate.slice(1)));const b=$('#approveHistory'+gate+'Button');if(b)b.disabled=true}catch(e){log(gate+' 补录失败：'+e.message,Number(gate.slice(1)))}}
-async function approveG2(){try{await get('/api/approve',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({path:current,gate:'G2'})});log('已记录 G2 审批。',2);return checkWorkspace()}catch(e){log('G2 审批失败：'+e.message,2)}}
-async function approveHistoryG2(){try{await get('/api/approve',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({path:current,gate:'G2'})});log('已补录 G2 审批。',2);const b=$('#approveHistoryG2Button');if(b)b.disabled=true}catch(e){log('G2 补录失败：'+e.message,2)}}
-async function approveProgress(){try{await approveG1();return checkWorkspace()}catch(e){log('G1 审批失败：'+e.message,1)}}
-async function approveG1(){const choice=$('#directionChoice')?.value||'A';await get('/api/approve',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({path:current,gate:'G1',choice})});log('已记录 G1 审批：选择方向 '+choice+'。',1)}
-async function progressAction(){const button=$('#progressButton');if(activeJob&&activeJobPhase===activePhase&&button&&button.textContent.indexOf('检查')===0){if(activePhase===1){try{await approveG1()}catch(e){log('G1 审批失败：'+e.message,1);return}}return checkWorkspace()}if(activePhase>=2&&activePhase<=5){activeJob='';return generatePhase()}return checkWorkspace()}
-async function checkWorkspace(){if(!current)return;const output=$('#phaseCheck-'+activePhase);try{log('正在检查当前 Phase 并准备推进…',activePhase);const j=await get('/api/check?path='+encodeURIComponent(current));if(!j.ok){output.className='error';output.textContent=j.output.trim()+'\n\n下一步：'+phaseInstruction(activePhase);log('当前 Phase 未通过：'+phaseInstruction(activePhase),activePhase);return}if(activePhase===5){output.className='success';output.textContent=j.output.trim()+'\n\nPhase 5 检查通过，发布交付物已完成。';log('Phase 5 检查通过，全部阶段已完成。',activePhase);return}await advancePhase()}catch(e){output.className='error';output.textContent=e.message;log('检查失败：'+e.message,activePhase)}}
-async function advancePhase(){const s=await get('/api/state?path='+encodeURIComponent(current));await get('/api/advance',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({path:current,fromPhase:Number(s.phase)})});log('已进入 Phase '+(Number(s.phase)+1)+'。',activePhase);await loadState()}
-function esc(s){return String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
-for(const role of ['Generation','Review']){fillEfforts(role);$('#agent'+role+'Engine').addEventListener('change',()=>fillEfforts(role))}$('#chooseOutputButton').addEventListener('click',()=>openChooser('output'));$('#chooseSourceButton').addEventListener('click',()=>openChooser('source'));$('#cancelChooser').addEventListener('click',()=>dialog.close());$('#confirmChooser').addEventListener('click',confirmChooser);$('#initButton').addEventListener('click',initWorkspace);$('#phases').addEventListener('click',event=>{if(event.target.id==='generateButton')generatePhase();if(event.target.id==='progressButton')progressAction();if(event.target.id==='approveProgressButton')approveProgress();if(event.target.id==='approveG2Button')approveG2();if(event.target.id==='approveHistoryButton')approveHistory();if(event.target.id==='approveHistoryG2Button')approveHistoryG2();if(event.target.id==='approveG3Button')approveGate('G3');if(event.target.id==='approveG4Button')approveGate('G4');if(event.target.id==='approveHistoryG3Button')approveHistoryGate('G3');if(event.target.id==='approveHistoryG4Button')approveHistoryGate('G4')});window.addEventListener('popstate',()=>{const p=new URL(location.href).searchParams.get('workspace');current=p||'';if(current)loadState()});scan();const initial=new URL(location.href).searchParams.get('workspace');if(initial){current=initial;loadState()}
-</script></body></html>'''
-
-
+HTML = (ROOT / "assets" / "workbench.html").read_text(encoding="utf-8")
+DEFAULT_WORKSPACE_DIR = "brand-workspace"
+# One agent run (a phase, a unit generation or a review) is stopped after this many seconds.
+AGENT_TIMEOUT = 600
 
 
 def page_html():
@@ -100,24 +54,37 @@ def recommended_folder(root):
     return target
 
 
+SCAN_FILE_LIMIT = 5000
+
+
+def count_files(root):
+    """Readable files under root, as text for the page; stops at SCAN_FILE_LIMIT so a home directory cannot stall it."""
+    count = 0
+    try:
+        for item in root.rglob("*"):
+            if item.is_file() and ".git" not in item.parts:
+                count += 1
+                if count >= SCAN_FILE_LIMIT:
+                    return "%d+ 个可读取文件" % SCAN_FILE_LIMIT
+    except OSError:
+        return "部分内容无法读取（已读到 %d 个文件）" % count
+    return "%d 个可读取文件" % count
+
+
 def candidates(root):
     items = []
-    try:
-        file_count = sum(1 for p in root.rglob("*") if p.is_file() and ".git" not in p.parts)
-    except OSError:
-        file_count = 0
     if is_workspace(root):
         items.append({"path": str(root), "kind": "已有品牌工作区", "workspace": True})
     else:
-        items.append({"path": str(root), "kind": "指定目录 · %d 个可读取文件" % file_count, "workspace": False})
+        items.append({"path": str(root), "kind": "指定目录 · " + count_files(root), "workspace": False})
         for child in sorted(root.iterdir()):
             if child.is_dir() and child.name not in {".git", "node_modules", ".venv"}:
                 items.append({"path": str(child), "kind": "已有目录" + (" · 品牌工作区" if is_workspace(child) else ""), "workspace": is_workspace(child)})
     return items
 
 
-UI_STACKS = {"html-css-js", "react"}
-UI_PLATFORMS = {"web", "desktop", "ios", "android"}
+UI_STACKS = check_workspace.STACK_PROFILES
+UI_PLATFORMS = check_workspace.UI_PLATFORMS
 UI_UNIT_KINDS = check_workspace.UNIT_KINDS
 # Seeds dependsOn in a new manifest; generation and the checker both read the manifest afterwards.
 UI_UNIT_DEPENDENCIES = {
@@ -128,7 +95,7 @@ UI_UNIT_DEPENDENCIES = {
     "page": ("component",),
     "platform-adaptation": ("page",),
 }
-UI_UNIT_PHASE = 4
+UI_UNIT_PHASE = check_workspace.UI_UNIT_PHASE
 # ponytail: one lock for every state read-modify-write, shared by all workspaces and held across the advance
 # checker run; it only guards writers inside this workbench process. Per-workspace locks if contention shows up.
 STATE_LOCK = threading.RLock()
@@ -199,9 +166,9 @@ def _manifest_hash(manifest):
     return "sha256:" + hashlib.sha256(encoded).hexdigest()
 
 
-def sync_manifest_hash(workspace):
-    workspace = Path(workspace).expanduser().resolve()
-    manifest_path = workspace / "src/ui/ir/manifest.json"
+def sync_manifest_hash(path):
+    path = Path(path).expanduser().resolve()
+    manifest_path = path / "src/ui/ir/manifest.json"
     manifest = _read_json(manifest_path)
     manifest["hash"] = _manifest_hash(manifest)
     _write_json(manifest_path, manifest)
@@ -215,19 +182,19 @@ def _unit_record(manifest, unit_id):
     raise ValueError("未知 UI unit: %s" % unit_id)
 
 
-def _unit_states(workspace):
-    units = _read_json(workspace / "project/status.json").get("units", [])
+def _unit_states(path):
+    units = _read_json(path / "project/status.json").get("units", [])
     return {item.get("unitId"): item.get("status") for item in units if isinstance(item, dict)}
 
 
-def set_unit_status(workspace, unit_id, status, note=None):
+def set_unit_status(path, unit_id, status, note=None):
     """Write the unit status to status.json, the only record of progress; the manifest holds design content."""
     if status not in check_workspace.UNIT_STATUSES:
         raise ValueError("未知 UI unit status")
-    workspace = Path(workspace).expanduser().resolve()
+    path = Path(path).expanduser().resolve()
     with STATE_LOCK:
-        unit = _unit_record(_read_json(workspace / "src/ui/ir/manifest.json"), unit_id)
-        status_path = workspace / "project/status.json"
+        unit = _unit_record(_read_json(path / "src/ui/ir/manifest.json"), unit_id)
+        status_path = path / "project/status.json"
         state = _read_json(status_path)
         units = state.setdefault("units", [])
         record = next((item for item in units if item.get("unitId") == unit_id), None)
@@ -254,15 +221,15 @@ def _dependents(manifest, unit_id):
     return found
 
 
-def prepare_unit_generation(workspace, unit_id):
-    workspace = Path(workspace).expanduser().resolve()
-    manifest = _read_json(workspace / "src/ui/ir/manifest.json")
+def prepare_unit_generation(path, unit_id):
+    path = Path(path).expanduser().resolve()
+    manifest = _read_json(path / "src/ui/ir/manifest.json")
     unit = _unit_record(manifest, unit_id)
     missing = check_workspace.unsatisfied_dependencies(
-        workspace,
+        path,
         manifest,
-        _unit_states(workspace),
-        check_workspace.latest_unit_reviews(_read_json(workspace / "project/approvals.json", [])),
+        _unit_states(path),
+        check_workspace.latest_unit_reviews(_read_json(path / "project/approvals.json", [])),
         unit,
     )
     if missing:
@@ -270,42 +237,42 @@ def prepare_unit_generation(workspace, unit_id):
     return unit
 
 
-def begin_unit_generation(workspace, unit_id):
+def begin_unit_generation(path, unit_id):
     """Claim a unit for (re)generation; units built on its previous output must be redone."""
-    workspace = Path(workspace).expanduser().resolve()
+    path = Path(path).expanduser().resolve()
     with STATE_LOCK:
-        prepare_unit_generation(workspace, unit_id)
-        manifest = _read_json(workspace / "src/ui/ir/manifest.json")
-        states = _unit_states(workspace)
+        prepare_unit_generation(path, unit_id)
+        manifest = _read_json(path / "src/ui/ir/manifest.json")
+        states = _unit_states(path)
         for dependent in _dependents(manifest, unit_id):
-            if states.get(dependent, "not-started") != "not-started":
-                set_unit_status(workspace, dependent, "changes-requested", "上游 unit %s 已重新生成，需要按新产出重做" % unit_id)
-        set_unit_status(workspace, unit_id, "in-progress")
+            if states.get(dependent, NOT_STARTED) != NOT_STARTED:
+                set_unit_status(path, dependent, CHANGES_REQUESTED, "上游 unit %s 已重新生成，需要按新产出重做" % unit_id)
+        set_unit_status(path, unit_id, IN_PROGRESS)
 
 
-def mark_unit_in_review(workspace, unit_id, generated_by=None):
-    workspace = Path(workspace).expanduser().resolve()
+def mark_unit_in_review(path, unit_id, generated_by=None):
+    path = Path(path).expanduser().resolve()
     with STATE_LOCK:
-        manifest = _read_json(workspace / "src/ui/ir/manifest.json")
+        manifest = _read_json(path / "src/ui/ir/manifest.json")
         unit = _unit_record(manifest, unit_id)
-        if _unit_states(workspace).get(unit_id) != "in-progress":
+        if _unit_states(path).get(unit_id) != IN_PROGRESS:
             raise ValueError("unit %s 不在生成中" % unit_id)
-        missing = [relative for relative in unit.get("files", []) if not (workspace / relative).is_file()]
+        missing = [relative for relative in unit.get("files", []) if not check_workspace.output_exists(path, {"files": [relative]})]
         if not unit.get("files") or missing:
             raise ValueError("unit %s 缺少 output：%s" % (unit_id, ", ".join(missing) or "未声明文件"))
-        set_unit_status(workspace, unit_id, "in-review")
-        manifest = _read_json(workspace / "src/ui/ir/manifest.json")
+        set_unit_status(path, unit_id, IN_REVIEW)
+        manifest = _read_json(path / "src/ui/ir/manifest.json")
         metadata = {
             "unitId": unit_id,
-            "status": "in-review",
+            "status": IN_REVIEW,
             "files": unit["files"],
             "manifestVersion": manifest["manifestVersion"],
             "manifestHash": manifest["hash"],
-            "outputHash": check_workspace.unit_output_hash(workspace, unit),
+            "outputHash": check_workspace.unit_output_hash(path, unit),
         }
         if generated_by:
             metadata["generatedBy"] = generated_by
-        _write_json(workspace / unit_dir(unit_id) / "metadata.json", metadata)
+        _write_json(path / unit_dir(unit_id) / "metadata.json", metadata)
         return metadata
 
 
@@ -314,7 +281,7 @@ def g1_choice(records):
         if not isinstance(record, dict) or record.get("kind", "gate") != "gate" or record.get("gate") != "G1":
             continue
         # The latest G1 record decides; a withdrawal must not fall back to an older approval.
-        if record.get("status") == "approved":
+        if record.get("status") == APPROVED:
             snapshot = record.get("snapshot", "")
             confirmation = record.get("confirmation", "")
             for choice in ("A", "B", "C"):
@@ -324,7 +291,7 @@ def g1_choice(records):
     raise ValueError("缺少有效 G1 approved 方向选择")
 
 
-def append_unit_review(workspace, unit_id, conclusion, reviewer, evidence, file_scope, output_hash, summary=None):
+def append_unit_review(path, unit_id, conclusion, reviewer, evidence, file_scope, output_hash, summary=None):
     if conclusion not in check_workspace.REVIEW_CONCLUSIONS:
         raise ValueError("unit review conclusion 无效")
     if not isinstance(reviewer, dict) or reviewer.get("type") != "subagent" or not str(reviewer.get("name") or "").strip():
@@ -335,18 +302,18 @@ def append_unit_review(workspace, unit_id, conclusion, reviewer, evidence, file_
         raise ValueError("unit review 必须包含 fileScope")
     if summary is not None and (not isinstance(summary, str) or not summary.strip()):
         raise ValueError("unit review summary 必须是非空文字")
-    workspace = Path(workspace).expanduser().resolve()
+    path = Path(path).expanduser().resolve()
     with STATE_LOCK:
-        manifest = _read_json(workspace / "src/ui/ir/manifest.json")
+        manifest = _read_json(path / "src/ui/ir/manifest.json")
         unit = _unit_record(manifest, unit_id)
-        if _unit_states(workspace).get(unit_id) != "in-review":
+        if _unit_states(path).get(unit_id) != IN_REVIEW:
             raise ValueError("unit 尚未进入 in-review")
         for scope in file_scope:
             if not isinstance(scope, dict) or not isinstance(scope.get("path"), str) or type(scope.get("startLine")) is not int or type(scope.get("endLine")) is not int or scope["startLine"] < 1 or scope["endLine"] < scope["startLine"]:
                 raise ValueError("fileScope 必须包含有效的 path 和行号")
             if scope["path"] not in unit["files"]:
                 raise ValueError("fileScope 只能引用该 unit 的输出文件")
-        digest = check_workspace.unit_output_hash(workspace, unit)
+        digest = check_workspace.unit_output_hash(path, unit)
         if digest is None:
             raise ValueError("outputHash 无法核对：unit 的输出文件不存在")
         if output_hash != digest:
@@ -366,35 +333,35 @@ def append_unit_review(workspace, unit_id, conclusion, reviewer, evidence, file_
         }
         if summary is not None:
             record["summary"] = summary.strip()
-        approvals_path = workspace / "project/approvals.json"
+        approvals_path = path / "project/approvals.json"
         approvals = _read_json(approvals_path, [])
         approvals.append(record)
         _write_json(approvals_path, approvals)
-        set_unit_status(workspace, unit_id, conclusion)
+        set_unit_status(path, unit_id, conclusion)
         return record
 
 
-def unit_overview(workspace):
+def unit_overview(path):
     """Unit states, blockers, allowed actions and the current unit, computed here so the page only renders them."""
-    workspace = Path(workspace).expanduser().resolve()
-    manifest = _read_json(workspace / "src/ui/ir/manifest.json", {})
+    path = Path(path).expanduser().resolve()
+    manifest = _read_json(path / "src/ui/ir/manifest.json", {})
     if not manifest.get("units"):
         return {"units": [], "currentUnit": None, "phaseBlocker": ""}
-    status = _read_json(workspace / "project/status.json")
-    states = _unit_states(workspace)
-    approvals = _read_json(workspace / "project/approvals.json", [])
+    status = _read_json(path / "project/status.json")
+    states = _unit_states(path)
+    approvals = _read_json(path / "project/approvals.json", [])
     reviews = check_workspace.latest_unit_reviews(approvals)
     notes = {item.get("unitId"): item.get("note") for item in status.get("units", []) if isinstance(item, dict)}
     try:
-        _require_unit_phase(workspace, UI_UNIT_PHASE)
+        _require_unit_phase(path, UI_UNIT_PHASE)
         phase_blocker = ""
     except ValueError as exc:
         phase_blocker = str(exc)
-    busy = _running_job(workspace)
+    busy = _running_job(path)
     overview = []
     for unit in manifest["units"]:
-        state = states.get(unit["id"], "not-started")
-        blocked_by = check_workspace.unsatisfied_dependencies(workspace, manifest, states, reviews, unit)
+        state = states.get(unit["id"], NOT_STARTED)
+        blocked_by = check_workspace.unsatisfied_dependencies(path, manifest, states, reviews, unit)
         review = reviews.get(unit["id"])
         overview.append({
             "id": unit["id"],
@@ -404,18 +371,18 @@ def unit_overview(workspace):
             "dependsOn": unit.get("dependsOn", []),
             "blockedBy": blocked_by,
             "output": unit["files"][0],
-            "outputExists": check_workspace.output_exists(workspace, unit),
+            "outputExists": check_workspace.output_exists(path, unit),
             "review": None if review is None else {
                 "conclusion": review.get("conclusion"),
                 "reviewer": (review.get("reviewer") or {}).get("name"),
                 "summary": review.get("summary") or "",
                 "evidence": review.get("evidence", []),
-                "current": check_workspace.review_current(workspace, review, manifest, unit),
+                "current": check_workspace.review_current(path, review, manifest, unit),
             },
             "canGenerate": not phase_blocker and not blocked_by and not busy,
-            "canReview": not phase_blocker and state == "in-review" and not busy,
+            "canReview": not phase_blocker and state == IN_REVIEW and not busy,
         })
-    current = next((item["id"] for item in overview if item["status"] != "approved"), None)
+    current = next((item["id"] for item in overview if item["status"] != APPROVED), None)
     return {"units": overview, "currentUnit": current, "phaseBlocker": phase_blocker}
 
 
@@ -429,7 +396,7 @@ def _normalize_agents(agents):
     for role, setting in agents.items():
         if role in check_workspace.AGENT_ROLES and isinstance(setting, dict):
             setting = {key: value for key, value in setting.items() if value not in (None, "")}
-            if not setting or setting == {"engine": "codex"}:
+            if not setting or setting == {"engine": check_workspace.DEFAULT_ENGINE}:
                 continue
         cleaned[role] = setting
     problems = check_workspace.agent_settings_problems(cleaned)
@@ -438,8 +405,14 @@ def _normalize_agents(agents):
     return cleaned
 
 
-def init_workspace(path, official, one_liner, source_path=None, capabilities=None, stack_profile="html-css-js", platforms=None, agents=None):
+def init_workspace(path, official, one_liner, source_path=None, capabilities=None, stack_profile=UI_STACKS[0], platforms=None, agents=None):
     path = Path(path).expanduser().resolve()
+    with STATE_LOCK:
+        _refuse_while_running(path)
+        return _init_workspace(path, official, one_liner, source_path, capabilities, stack_profile, platforms, agents)
+
+
+def _init_workspace(path, official, one_liner, source_path, capabilities, stack_profile, platforms, agents):
     agents = _normalize_agents(agents)
     source = None
     if source_path:
@@ -492,7 +465,7 @@ def init_workspace(path, official, one_liner, source_path=None, capabilities=Non
     else:
         status = {"phase": 0, "state": "draft", "completed": [], "next": ["complete brief", "generate directions"], "blockers": []}
     if "units" not in status:
-        status["units"] = [{"unitId": kind, "status": "not-started"} for kind in UI_UNIT_KINDS]
+        status["units"] = [{"unitId": kind, "status": NOT_STARTED} for kind in UI_UNIT_KINDS]
     _write_json(status_path, status)
     approvals_path = path / "project/approvals.json"
     if not approvals_path.exists():
@@ -530,40 +503,60 @@ def _phase_requirements(phase):
     return []
 
 
+# Process groups of running agents; main() stops whatever is left when the workbench exits.
+AGENT_GROUPS = set()
+
+
+def _stop_group(pid):
+    try:
+        os.killpg(pid, signal.SIGKILL)
+    except OSError:  # nothing left in the group, or not ours to signal any more
+        pass
+
+
 def _run_agent(cmd, cwd, timeout, output_path=None):
     """Run one agent CLI (codex or Claude Code) to completion and return its exit code.
 
     With output_path, everything it printed is saved there for the caller to parse.
     """
-    # Own process group, so a timeout also stops the commands the agent started before files are compared.
+    # Own process group, so stopping it also stops the commands the agent started before files are compared.
     # stdin is closed: Claude Code otherwise waits for piped input before starting.
-    proc = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, cwd=str(cwd), start_new_session=True)
+    proc = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, cwd=str(cwd), start_new_session=True)
+    AGENT_GROUPS.add(proc.pid)
     selector = selectors.DefaultSelector()
     selector.register(proc.stdout, selectors.EVENT_READ)
     deadline = time.time() + timeout
-    lines = []
+    chunks = []
     try:
         while True:
-            if time.time() > deadline:
-                try:
-                    os.killpg(proc.pid, signal.SIGKILL)
-                except ProcessLookupError:
-                    pass
+            remaining = deadline - time.time()
+            if remaining <= 0:
+                _stop_group(proc.pid)
                 proc.wait()
                 raise TimeoutError("%s 进程超过 %d 分钟未完成，已停止" % (cmd[0], timeout // 60))
-            if selector.select(timeout=1):
-                line = proc.stdout.readline()
-                if not line:
+            # os.read returns whatever is available; readline would block past the deadline on a partial line.
+            if selector.select(timeout=min(1, remaining)):
+                data = os.read(proc.stdout.fileno(), 65536)
+                if not data:
                     break
-                if output_path:
-                    lines.append(line)
+                chunks.append(data)
             elif proc.poll() is not None:
                 break
+        try:
+            code = proc.wait(timeout=max(0.1, deadline - time.time()))
+        except subprocess.TimeoutExpired:
+            _stop_group(proc.pid)
+            proc.wait()
+            raise TimeoutError("%s 进程超过 %d 分钟未完成，已停止" % (cmd[0], timeout // 60))
     finally:
         selector.close()
+        proc.stdout.close()
+        # Background commands the agent left running would otherwise keep writing after the restore check.
+        _stop_group(proc.pid)
+        AGENT_GROUPS.discard(proc.pid)
         if output_path:
-            Path(output_path).write_text("".join(lines), encoding="utf-8")
-    return proc.wait()
+            Path(output_path).write_text(b"".join(chunks).decode("utf-8", "replace"), encoding="utf-8")
+    return code
 
 
 def _claude_result(output_path):
@@ -623,10 +616,14 @@ def _finish_job(job_id, status, error=""):
     _job_log(job_id, "任务失败：" + error if error else "任务已完成。", "失败" if error else "已完成")
 
 
+def _run_checker(path, phase):
+    return subprocess.run([sys.executable, str(ROOT / "scripts/check_workspace.py"), str(path), "--phase", str(phase)], capture_output=True, text=True)
+
+
 def _record_phase_check(job_id, path, phase):
     """The phase check is reported next to the job, not folded into it: mid-progression it is expected to fail."""
     _job_log(job_id, "正在运行 Phase %d 检查…" % phase, "运行 Phase %d 检查" % phase)
-    check = subprocess.run([sys.executable, str(ROOT / "scripts/check_workspace.py"), str(path), "--phase", str(phase)], capture_output=True, text=True)
+    check = _run_checker(path, phase)
     output = (check.stdout + check.stderr).strip()
     with JOBS_LOCK:
         JOBS[job_id]["check"] = {"passed": check.returncode == 0, "output": output}
@@ -635,10 +632,9 @@ def _record_phase_check(job_id, path, phase):
 
 def _missing_gates(path, phase):
     """Gates config/phase_requirements.json requires for `phase` whose latest record is not approved."""
-    records = _read_json(path / "project/approvals.json", [])
-    latest = {item.get("gate"): item.get("status") for item in records if isinstance(item, dict) and item.get("kind", "gate") == "gate"}
+    latest = check_workspace.latest_gate_states(_read_json(path / "project/approvals.json", []), [])
     required = check_workspace.CONTRACT["phases"].get(str(phase), {}).get("requiresApprovals", [])
-    return [gate for gate in required if latest.get(gate) != "approved"]
+    return [gate for gate in required if latest.get(gate) != APPROVED]
 
 
 def _require_gates(path, phase):
@@ -662,9 +658,13 @@ GATE_SNAPSHOTS = {"G2": "review-02-identity", "G3": "review-03-system", "G4": "r
 GATE_REVIEW_PAGES = {"G1": "方向审阅页", "G2": "身份审阅页", "G3": "系统审阅页", "G4": "资产审阅页"}
 
 
-def record_gate(path, gate, choice=None):
+def record_gate(path, gate, choice=None, status=APPROVED):
     if gate not in GATE_SPECS:
         raise ValueError("只支持 G1、G2、G3 或 G4 审批")
+    if status == CHANGES_REQUESTED:
+        return _withdraw_gate(path, gate)
+    if status != APPROVED:
+        raise ValueError("审批状态只能是 approved 或 changes-requested")
     if gate == "G1" and choice not in ("A", "B", "C"):
         raise ValueError("G1 必须选择 A、B 或 C 方向")
     required_phase, scope, confirmation = GATE_SPECS[gate]
@@ -675,11 +675,25 @@ def record_gate(path, gate, choice=None):
         approvals_path = path / "project/approvals.json"
         records = _read_json(approvals_path, [])
         records.append({
-            "kind": "gate", "gate": gate, "status": "approved", "scope": scope,
+            "kind": "gate", "gate": gate, "status": APPROVED, "scope": scope,
             "snapshot": "direction-%s" % choice if gate == "G1" else GATE_SNAPSHOTS[gate],
             "confirmation": confirmation % choice if gate == "G1" else confirmation,
             "approvedAt": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
             "version": "workbench-%s-%d" % (gate.lower(), int(time.time())),
+        })
+        _write_json(approvals_path, records)
+
+
+def _withdraw_gate(path, gate):
+    """Append a changes-requested record: the latest record decides the gate, older ones stay as history."""
+    with STATE_LOCK:
+        _refuse_while_running(path)
+        approvals_path = path / "project/approvals.json"
+        records = _read_json(approvals_path, [])
+        records.append({
+            "kind": "gate", "gate": gate, "status": CHANGES_REQUESTED, "scope": GATE_SPECS[gate][1],
+            "confirmation": "用户在工作台撤回 %s，要求修改" % gate,
+            "requestedAt": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         })
         _write_json(approvals_path, records)
 
@@ -699,7 +713,7 @@ def advance_phase(path, from_phase):
         if missing:
             raise ValueError("Phase %d 已生成交付物，但不能进入 Phase %d：请先查看%s并确认 %s" % (
                 phase, phase + 1, GATE_REVIEW_PAGES.get(missing[-1], "审阅页"), "、".join(missing)))
-        check = subprocess.run([sys.executable, str(ROOT / "scripts/check_workspace.py"), str(path), "--phase", str(phase)], capture_output=True, text=True)
+        check = _run_checker(path, phase)
         if check.returncode != 0:
             raise ValueError("当前阶段检查未通过，不能推进：\n" + check.stdout + check.stderr)
         status["phase"] = phase + 1
@@ -751,7 +765,7 @@ def start_generation(path, phase):
             raise
 
     def run():
-        cmd = ["codex", "exec", "--ephemeral", "--skip-git-repo-check", "-s", "danger-full-access", "-C", str(path), "--add-dir", str(path), "--add-dir", str(ROOT), "--json", prompt]
+        cmd = ["codex", "exec", "--ephemeral", "--skip-git-repo-check", "-s", "workspace-write", "-C", str(path), "--json", prompt]
         try:
             workspace_files = sorted(item for item in path.rglob("*") if item.is_file() and ".git" not in item.parts)
             _job_log(job_id, "已读取工作区资料：%d 个文件" % len(workspace_files))
@@ -761,7 +775,7 @@ def start_generation(path, phase):
             _job_log(job_id, "正在生成 Phase %d 交付物…" % phase, "生成 Phase %d" % phase)
             run_error, code = None, None
             try:
-                code = _run_agent(cmd, path, 600)
+                code = _run_agent(cmd, path, AGENT_TIMEOUT)
             except Exception as exc:
                 run_error = exc
             # Approvals, the UI manifest, unit outputs and unit progress belong to other flows.
@@ -796,7 +810,7 @@ def _unit_feedback(path, unit_id):
     """What the last review and the unit's status note asked for, so a regeneration can act on it."""
     lines = []
     review = check_workspace.latest_unit_reviews(_read_json(path / "project/approvals.json", [])).get(unit_id)
-    if review and review.get("conclusion") == "changes-requested":
+    if review and review.get("conclusion") == CHANGES_REQUESTED:
         lines.append("最近一次审查（针对上一版输出）要求修改，逐条处理后重写，仍存在的问题都要解决：" + "；".join(review.get("evidence", [])))
     units = _read_json(path / "project/status.json").get("units", [])
     note = next((item.get("note") for item in units if isinstance(item, dict) and item.get("unitId") == unit_id), "")
@@ -834,16 +848,24 @@ def _snapshot(path, roots, excluded=None):
 
 
 def _restore(path, roots, before, excluded=None):
+    """Put protected files back as they were before a job. The job may not be the only writer (the user can edit
+    in another program meanwhile), so each changed version is copied out first and its location reported."""
     after = _snapshot(path, roots, excluded)
     changed = sorted(rel for rel in set(before) | set(after) if before.get(rel) != after.get(rel))
+    backup = Path(tempfile.mkdtemp(prefix="brand-system-restore-")) if any(rel in after for rel in changed) else None
+    reported = []
     for rel in changed:
         target = path / rel
+        if rel in after:
+            (backup / rel).parent.mkdir(parents=True, exist_ok=True)
+            (backup / rel).write_bytes(after[rel])
         if rel in before:
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_bytes(before[rel])
         else:
             target.unlink()
-    return changed
+        reported.append("%s（改动后的版本已保存到 %s）" % (rel, backup / rel) if rel in after else rel)
+    return reported
 
 
 def _protected_snapshot(path, unit_id):
@@ -918,7 +940,7 @@ def _agent_setting(path, role):
     if problems:
         raise ValueError("config/ui.json 的 AI 设置无效：" + "；".join(problems))
     setting = dict(agents.get(role) or {})
-    setting.setdefault("engine", "codex")
+    setting.setdefault("engine", check_workspace.DEFAULT_ENGINE)
     return setting
 
 
@@ -956,11 +978,11 @@ def _agent_command(path, setting, prompt, unit_id=None, verdict_path=None):
 def _run_agent_command(cmd, path, setting):
     """Run cmd; for Claude Code also return its parsed result, which decides success."""
     if setting["engine"] != "claude":
-        return _run_agent(cmd, path, 600), None
+        return _run_agent(cmd, path, AGENT_TIMEOUT), None
     handle, output_path = tempfile.mkstemp(prefix="brand-system-claude-", suffix=".json")
     os.close(handle)
     try:
-        code = _run_agent(cmd, path, 600, output_path=output_path)
+        code = _run_agent(cmd, path, AGENT_TIMEOUT, output_path=output_path)
         return code, _claude_result(output_path) if code == 0 else None
     finally:
         os.unlink(output_path)
@@ -1033,10 +1055,10 @@ def _fail_unit_job(job_id, path, unit_id, exc):
     error = str(exc)
     try:
         state = _unit_states(path).get(unit_id)
-        if state == "in-progress":
-            set_unit_status(path, unit_id, "in-progress", "生成失败：%s" % exc)
-        elif state == "in-review":
-            set_unit_status(path, unit_id, "in-review", "自动审查失败：%s" % exc)
+        if state == IN_PROGRESS:
+            set_unit_status(path, unit_id, IN_PROGRESS, "生成失败：%s" % exc)
+        elif state == IN_REVIEW:
+            set_unit_status(path, unit_id, IN_REVIEW, "自动审查失败：%s" % exc)
     except Exception as note_error:
         error += "（记录失败原因时也出错：%s）" % note_error
     # Always reached: a job left "running" refuses every later job, approval and advance in this workspace.
@@ -1107,9 +1129,9 @@ def start_unit_job(path, phase, unit_id):
 def start_review_job(path, phase, unit_id):
     """Re-run only the independent review for a unit whose output is waiting for one."""
     path = Path(path).expanduser().resolve()
-    _require_unit_phase(path, phase)
     with STATE_LOCK:
-        if _unit_states(path).get(unit_id) != "in-review":
+        _require_unit_phase(path, phase)
+        if _unit_states(path).get(unit_id) != IN_REVIEW:
             raise ValueError("只有等待审查的 unit 可以重新审查")
         job_id = _create_job(path, "review " + unit_id, unit_id)
 
@@ -1124,25 +1146,60 @@ def start_review_job(path, phase, unit_id):
     return job_id
 
 
+PREVIEW_TYPES = {".html": "text/html", ".htm": "text/html", ".md": "text/plain", ".txt": "text/plain", ".json": "application/json",
+                 ".css": "text/css", ".js": "text/javascript", ".svg": "image/svg+xml", ".png": "image/png",
+                 ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".webp": "image/webp", ".ico": "image/x-icon", ".pdf": "application/pdf"}
+
+
 class Handler(BaseHTTPRequestHandler):
     root = Path.cwd().resolve()
+
     @classmethod
     def workspace_path(cls, raw):
-        path = Path(raw).expanduser().resolve()
+        """Resolve a workspace path the page sent; relative paths are relative to the startup directory."""
+        path = Path(raw).expanduser()
+        path = (path if path.is_absolute() else cls.root / path).resolve()
         if not path.is_relative_to(cls.root):
             raise ValueError("工作区必须位于启动目录内")
         return path
+
+    def trusted_request(self):
+        """Only the workbench page itself may call it: another site the user opens could otherwise POST approvals
+        and start agents (CSRF), and a DNS-rebinding name would pass as same-origin without the Host check."""
+        port = self.server.server_address[1]
+        own = {"127.0.0.1:%d" % port, "localhost:%d" % port}
+        if self.headers.get("Host") not in own:
+            return False
+        origin = self.headers.get("Origin")
+        # Browsers send Origin on every POST; scripts and agents calling the API directly send none.
+        return origin is None or origin in {"http://" + host for host in own}
+
+    def send_body(self, data, content_type, status=200, extra_headers=()):
+        self.send_response(status)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(data)))
+        for name, value in extra_headers:
+            self.send_header(name, value)
+        self.end_headers()
+        self.wfile.write(data)
+
     def send_json(self, payload, status=200):
-        data = json.dumps(payload, ensure_ascii=False).encode()
-        self.send_response(status); self.send_header("Content-Type", "application/json; charset=utf-8"); self.send_header("Content-Length", str(len(data))); self.end_headers(); self.wfile.write(data)
+        self.send_body(json.dumps(payload, ensure_ascii=False).encode(), "application/json; charset=utf-8", status)
+
+    def send_error_json(self, exc):
+        if isinstance(exc, (ValueError, FileNotFoundError)):
+            return self.send_json({"error": str(exc)}, 400)
+        self.log_error("%s %s failed:\n%s", self.command, self.path, traceback.format_exc())
+        self.send_json({"error": "工作台内部错误（%s），详情见启动 workbench 的终端" % type(exc).__name__}, 500)
+
     def do_GET(self):
+        if not self.trusted_request():
+            return self.send_json({"error": "forbidden"}, 403)
         parsed = urlparse(self.path)
         try:
             if parsed.path == "/":
-                data = page_html().encode(); self.send_response(200); self.send_header("Content-Type", "text/html; charset=utf-8"); self.send_header("Content-Length", str(len(data))); self.end_headers(); self.wfile.write(data); return
-            from urllib.parse import parse_qs
+                return self.send_body(page_html().encode(), "text/html; charset=utf-8")
             q = parse_qs(parsed.query)
-            path = Path(q.get("path", [""])[0]).expanduser().resolve()
             if parsed.path == "/preview":
                 preview_path = self.workspace_path(q.get("path", [""])[0])
                 relative = q.get("file", [""])[0]
@@ -1151,14 +1208,18 @@ class Handler(BaseHTTPRequestHandler):
                 target = (preview_path / relative).resolve()
                 if not target.is_relative_to(preview_path) or not target.is_file():
                     raise ValueError("预览文件不存在")
-                data = target.read_bytes()
-                self.send_response(200); self.send_header("Content-Type", "text/html; charset=utf-8"); self.send_header("Content-Length", str(len(data))); self.end_headers(); self.wfile.write(data); return
+                content_type = PREVIEW_TYPES.get(target.suffix.lower(), "application/octet-stream")
+                if content_type.startswith("text/") or content_type == "application/json":
+                    content_type += "; charset=utf-8"
+                # Generated pages run in an opaque origin: their scripts still run, but cannot call this API
+                # (their requests carry Origin: null) and so cannot approve their own review.
+                return self.send_body(target.read_bytes(), content_type, extra_headers=(
+                    ("Content-Security-Policy", "sandbox allow-scripts allow-popups"), ("X-Content-Type-Options", "nosniff")))
             if parsed.path == "/api/scan":
-                target = path if q.get("path") else self.root
+                target = Path(q["path"][0]).expanduser().resolve() if q.get("path") else self.root
                 if not target.is_dir(): raise ValueError("指定路径不是可读取的文件夹")
                 if not target.is_relative_to(self.root.parent): raise ValueError("为安全起见，请指定启动目录或其父目录下的文件夹")
-                file_count = sum(1 for item in target.rglob("*") if item.is_file() and ".git" not in item.parts)
-                return self.send_json({"root": str(target), "items": candidates(target), "fileCount": file_count, "recommended": str(recommended_folder(target))})
+                return self.send_json({"root": str(target), "items": candidates(target), "fileCount": count_files(target), "recommended": str(recommended_folder(target))})
             if parsed.path == "/api/state":
                 path = self.workspace_path(q.get("path", [""])[0])
                 status = _read_json(path / "project/status.json")
@@ -1176,18 +1237,26 @@ class Handler(BaseHTTPRequestHandler):
                     return self.send_json(dict(job))
             if parsed.path == "/api/check":
                 path = self.workspace_path(q.get("path", [""])[0])
-                import subprocess, sys
-                p = subprocess.run([sys.executable, str(ROOT / "scripts/check_workspace.py"), str(path), "--phase", str(json.loads((path / "project/status.json").read_text())["phase"])], capture_output=True, text=True)
+                p = _run_checker(path, _read_json(path / "project/status.json")["phase"])
                 return self.send_json({"ok": p.returncode == 0, "output": p.stdout + p.stderr})
             self.send_json({"error": "not found"}, 404)
-        except Exception as exc: self.send_json({"error": str(exc)}, 400)
+        except Exception as exc:
+            self.send_error_json(exc)
+
     def do_POST(self):
+        if not self.trusted_request():
+            return self.send_json({"error": "forbidden"}, 403)
         endpoint = urlparse(self.path).path
         if endpoint not in {"/api/init", "/api/advance", "/api/generate", "/api/review", "/api/approve"}: return self.send_json({"error": "not found"}, 404)
         try:
             body = json.loads(self.rfile.read(int(self.headers.get("Content-Length", "0"))))
+            if not isinstance(body, dict):
+                raise ValueError("请求体必须是 JSON 对象")
+            if endpoint == "/api/init":
+                path = init_workspace(self.workspace_path(body.get("path") or DEFAULT_WORKSPACE_DIR), body.get("official", ""), body.get("oneLiner", ""), body.get("sourcePath") or None, body.get("capabilities") or [], body.get("stackProfile", UI_STACKS[0]), body.get("platforms"), body.get("agents"))
+                return self.send_json({"path": str(path)})
+            path = self.workspace_path(body.get("path", ""))
             if endpoint == "/api/approve":
-                path = self.workspace_path(body.get("path", ""))
                 if body.get("kind") == "unit-review":
                     with STATE_LOCK:
                         _refuse_while_running(path)
@@ -1202,30 +1271,26 @@ class Handler(BaseHTTPRequestHandler):
                             body.get("summary"),
                         )
                     return self.send_json({"ok": True, "record": record})
-                record_gate(path, body.get("gate"), body.get("choice"))
+                record_gate(path, body.get("gate"), body.get("choice"), body.get("status", APPROVED))
                 return self.send_json({"ok": True, "gate": body.get("gate")})
             if endpoint == "/api/generate":
-                path = self.workspace_path(body.get("path", ""))
                 unit_id = body.get("unitId")
                 phase = int(body.get("phase", 1))
                 if unit_id:
                     return self.send_json({"job": start_unit_job(path, phase, unit_id), "unitId": unit_id})
                 return self.send_json({"job": start_generation(path, phase)})
             if endpoint == "/api/review":
-                path = self.workspace_path(body.get("path", ""))
                 unit_id = body.get("unitId", "")
                 return self.send_json({"job": start_review_job(path, int(body.get("phase", 0)), unit_id), "unitId": unit_id})
-            if endpoint == "/api/advance":
-                path = self.workspace_path(body.get("path", ""))
-                return self.send_json({"path": str(path), "phase": advance_phase(path, int(body.get("fromPhase", -1)))})
-            target = Path(body.get("path") or (self.root / "brand-workspace"))
-            if not target.is_absolute(): target = self.root / target
-            with STATE_LOCK:
-                _refuse_while_running(target.expanduser().resolve())
-                path = init_workspace(target, body.get("official", ""), body.get("oneLiner", ""), body.get("sourcePath") or None, body.get("capabilities") or [], body.get("stackProfile", "html-css-js"), body.get("platforms"), body.get("agents"))
-            self.send_json({"path": str(path)})
-        except Exception as exc: self.send_json({"error": str(exc)}, 400)
-    def log_message(self, *_): pass
+            return self.send_json({"path": str(path), "phase": advance_phase(path, int(body.get("fromPhase", -1)))})
+        except Exception as exc:
+            self.send_error_json(exc)
+
+    def log_message(self, *_):
+        pass  # one line per poll would bury the URL the user needs; failures still go through log_error
+
+    def log_error(self, fmt, *args):
+        sys.stderr.write("workbench: " + (fmt % args) + "\n")
 
 
 def main(argv=None):
@@ -1233,9 +1298,17 @@ def main(argv=None):
     Handler.root = Path(args.directory).expanduser().resolve(); Handler.root.mkdir(parents=True, exist_ok=True)
     server = ThreadingHTTPServer(("127.0.0.1", args.port), Handler)
     print("Brand System Workbench: http://127.0.0.1:%d/" % args.port, flush=True)
-    try: server.serve_forever()
-    except KeyboardInterrupt: pass
-    finally: server.server_close()
+    if threading.current_thread() is threading.main_thread():
+        signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        server.server_close()
+        # Job threads are daemons and die with the process; the agents they started run in their own groups.
+        for pid in list(AGENT_GROUPS):
+            _stop_group(pid)
 
 
 if __name__ == "__main__": main()
