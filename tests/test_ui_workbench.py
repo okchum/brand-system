@@ -666,6 +666,23 @@ class UiWorkbenchTest(unittest.TestCase):
             self.assertEqual(self.read(root, "project/status.json")["state"], "in-review")
             self.assertTrue((workspace / "review/04-assets.html").is_file())
 
+    def test_failed_phase_job_leaves_status_as_it_found_it(self):
+        # status.json is the progress authority; a run that died must not leave its claims of completed work there.
+        with tempfile.TemporaryDirectory() as root:
+            workspace = self.phase_four(root)
+            before = (workspace / "project/status.json").read_text(encoding="utf-8")
+
+            def claim_then_timeout(cmd, cwd, timeout):
+                status_path = Path(cwd) / "project/status.json"
+                status = json.loads(status_path.read_text(encoding="utf-8"))
+                status.update(state="in-review", completed=["phase 4 assets"])
+                status_path.write_text(json.dumps(status), encoding="utf-8")
+                raise TimeoutError("codex 进程超过 30 分钟未完成")
+            with mock.patch.object(workbench, "_run_agent", side_effect=claim_then_timeout):
+                job = wait_for(workbench.start_generation(workspace, 4))
+            self.assertEqual(job["status"], "error")
+            self.assertEqual((workspace / "project/status.json").read_text(encoding="utf-8"), before)
+
     def test_unit_job_requires_phase_four_gates_and_one_job_per_workspace(self):
         with tempfile.TemporaryDirectory() as root:
             workspace = self.init(root)

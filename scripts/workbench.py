@@ -813,10 +813,10 @@ def start_generation(path, phase):
                     ("%s；" % run_error if run_error else "")
                     + "生成进程改动了审批、UI 清单或 unit 的内容，已恢复原样：" + "、".join(changed)
                 )
-            if run_error:
-                raise run_error
-            if code != 0:
-                raise RuntimeError("生成进程退出码 %d" % code)
+            if run_error or code != 0:
+                # A run that died may already have written that the phase is done; status is the progress authority.
+                (path / "project/status.json").write_bytes(status_before)
+                raise run_error or RuntimeError("生成进程退出码 %d" % code)
             for item in sorted(item for item in path.rglob("*") if item.is_file() and ".git" not in item.parts):
                 if item not in workspace_files:
                     _job_log(job_id, "已生成：" + str(item.relative_to(path)))
