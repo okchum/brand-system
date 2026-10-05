@@ -174,6 +174,20 @@ class UiWorkbenchTest(unittest.TestCase):
             self.assertIn("Direction C", workbench.JOBS[job_id]["prompt"])
             self.assertNotIn("Direction B", workbench.JOBS[job_id]["prompt"])
 
+    G1_APPROVED = {
+        "kind": "gate", "gate": "G1", "status": "approved", "scope": "strategy",
+        "snapshot": "direction-C", "confirmation": "选 C", "approvedAt": "now", "version": "v1",
+    }
+
+    def test_g1_choice_latest_record_decides_even_when_not_approved(self):
+        for status in ("changes-requested", "pending"):
+            with self.subTest(status=status):
+                withdrawn = dict(self.G1_APPROVED, status=status)
+                with self.assertRaisesRegex(ValueError, "G1"):
+                    workbench.g1_choice([self.G1_APPROVED, withdrawn])
+        later_gate = dict(self.G1_APPROVED, gate="G2")
+        self.assertEqual(workbench.g1_choice([self.G1_APPROVED, later_gate]), "C")
+
 
 if __name__ == "__main__":
     unittest.main()

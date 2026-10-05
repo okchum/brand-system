@@ -262,15 +262,16 @@ def mark_unit_in_review(workspace, unit_id, files):
 
 def g1_choice(records):
     for record in reversed(records):
-        if not isinstance(record, dict) or record.get("kind", "gate") != "gate":
+        if not isinstance(record, dict) or record.get("kind", "gate") != "gate" or record.get("gate") != "G1":
             continue
-        if record.get("gate") != "G1" or record.get("status") != "approved":
-            continue
-        snapshot = record.get("snapshot", "")
-        confirmation = record.get("confirmation", "")
-        for choice in ("A", "B", "C"):
-            if snapshot == "direction-" + choice and choice in confirmation:
-                return choice
+        # The latest G1 record decides; a withdrawal must not fall back to an older approval.
+        if record.get("status") == "approved":
+            snapshot = record.get("snapshot", "")
+            confirmation = record.get("confirmation", "")
+            for choice in ("A", "B", "C"):
+                if snapshot == "direction-" + choice and choice in confirmation:
+                    return choice
+        break
     raise ValueError("缺少有效 G1 approved 方向选择")
 
 
