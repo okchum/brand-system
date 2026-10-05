@@ -1,4 +1,5 @@
 import json
+import subprocess
 import tempfile
 import threading
 import unittest
@@ -273,6 +274,14 @@ class UiWorkbenchTest(unittest.TestCase):
             job = workbench.JOBS[job_id]
             self.assertEqual(job["status"], "error")
             self.assertIn("missing review/01-directions.html", job["error"])
+
+
+class UiWorkbenchScriptTest(unittest.TestCase):
+    def test_workbench_starts_as_a_script_from_another_directory(self):
+        with tempfile.TemporaryDirectory() as cwd:
+            result = subprocess.run([sys.executable, str(ROOT / "scripts/workbench.py"), "--help"], cwd=cwd, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("usage:", result.stdout)
 
 
 if __name__ == "__main__":

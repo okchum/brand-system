@@ -1,3 +1,6 @@
+# -*- coding: utf-8 -*-
+# Python 3.9 reads a script in fixed-size chunks and rejects a multi-byte character split across a chunk
+# boundary unless the encoding is declared; the embedded page has very long lines of Chinese text.
 """Run the browser-first brand-system workspace initializer.
 
 Usage: python3 scripts/workbench.py [DIRECTORY] [--port PORT]
