@@ -32,3 +32,5 @@
 `src/ui/ir/manifest.json` 是页面和组件工作单元的唯一清单，必须包含 `manifestVersion`、`hash` 和 `units`。每个 unit 必须包含 `id`、`kind`、`status`、`files`、`platforms`；`kind` 只能使用 `page-map`、`layout`、`component`、`page`、`platform-adaptation`。`status` 只能是 `in-progress`、`in-review`、`approved`、`changes-requested`、`completed`。
 
 工作顺序固定为：页面地图 → 布局 → 复用 → 组件 → 页面 → 平台适配；复用是组件设计前的强制步骤，不单独增加 unit kind。每个 unit 都必须启动独立 subagent review；审阅记录写入 `project/approvals.json` 的 `kind=unit-review`，不能用一次总评替代逐单元记录。
+
+依赖只认 manifest 每个 unit 的 `dependsOn`：初始化按上面的顺序写入，之后工作台生成与 checker 都读同一份。一个 unit 可以开始生成，前提是它的每个依赖都处于 `approved` 或 `completed`，且该依赖最新一条 unit-review 的结论为 `approved`、并绑定当前 manifest 的版本与 hash。`files` 在初始化时就写定为 `src/ui/units/<unitId>/output.html`：hash 覆盖 `files`，推进过程中再填写会让所有已绑定的 review 失效。

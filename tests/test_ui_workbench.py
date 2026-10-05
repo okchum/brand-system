@@ -188,6 +188,55 @@ class UiWorkbenchTest(unittest.TestCase):
         later_gate = dict(self.G1_APPROVED, gate="G2")
         self.assertEqual(workbench.g1_choice([self.G1_APPROVED, later_gate]), "C")
 
+    def review(self, workspace, unit_id):
+        path = "src/ui/units/%s/output.html" % unit_id
+        workbench.mark_unit_in_review(workspace, unit_id, [path])
+        return workbench.append_unit_review(
+            workspace, unit_id, "approved",
+            reviewer={"type": "subagent", "name": "ui-reviewer"},
+            evidence=["review-evidence.json"],
+            file_scope=[{"path": path, "startLine": 1, "endLine": 1}],
+        )
+
+    def test_sequential_progression_keeps_earlier_reviews_bound_to_the_manifest(self):
+        with tempfile.TemporaryDirectory() as root:
+            workspace = self.init(root)
+            first = self.review(workspace, "page-map")
+            workbench.prepare_unit_generation(workspace, "layout")
+            self.review(workspace, "layout")
+            manifest = self.read(root, "src/ui/ir/manifest.json")
+            self.assertEqual(first["manifestHash"], manifest["hash"])
+
+    def test_completed_dependency_unblocks_downstream_generation(self):
+        with tempfile.TemporaryDirectory() as root:
+            workspace = self.init(root)
+            self.review(workspace, "page-map")
+            workbench.set_unit_status(workspace, "page-map", "completed")
+            workbench.prepare_unit_generation(workspace, "layout")
+
+    def test_generation_follows_manifest_depends_on(self):
+        with tempfile.TemporaryDirectory() as root:
+            workspace = self.init(root)
+            manifest = self.read(root, "src/ui/ir/manifest.json")
+            self.assertEqual(manifest["units"][1]["dependsOn"], ["page-map"])
+            manifest["units"][1]["dependsOn"] = []
+            manifest["units"][0]["dependsOn"] = ["platform-adaptation"]
+            (workspace / "src/ui/ir/manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+            workbench.prepare_unit_generation(workspace, "layout")
+            with self.assertRaisesRegex(ValueError, "platform-adaptation"):
+                workbench.prepare_unit_generation(workspace, "page-map")
+
+    def test_dependency_needs_latest_review_approved(self):
+        with tempfile.TemporaryDirectory() as root:
+            workspace = self.init(root)
+            self.review(workspace, "page-map")
+            approvals_path = workspace / "project/approvals.json"
+            approvals = json.loads(approvals_path.read_text(encoding="utf-8"))
+            approvals.append(dict(approvals[-1], status="changes-requested", conclusion="changes-requested"))
+            approvals_path.write_text(json.dumps(approvals), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "page-map"):
+                workbench.prepare_unit_generation(workspace, "layout")
+
 
 if __name__ == "__main__":
     unittest.main()

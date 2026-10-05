@@ -34,19 +34,20 @@ def approval(gate, status="approved"):
     }
 
 
-def unit_review(manifest, unit):
-    relative = unit["files"][0]
-    return {
-        "kind": "unit-review",
-        "status": "approved",
-        "unitId": unit["id"],
-        "manifestVersion": manifest["manifestVersion"],
-        "manifestHash": manifest["hash"],
-        "fileScope": [{"path": relative, "startLine": 1, "endLine": 1}],
-        "reviewer": {"type": "subagent", "name": "smoke-reviewer"},
-        "conclusion": "approved",
-        "evidence": ["smoke fixture evidence"],
-    }
+def review_units_in_order(workspace):
+    units = json.loads((workspace / "src/ui/ir/manifest.json").read_text(encoding="utf-8"))["units"]
+    for unit in units:
+        relative = workbench.unit_output_path(unit["id"])
+        workbench.prepare_unit_generation(workspace, unit["id"])
+        workbench.mark_unit_in_review(workspace, unit["id"], [relative])
+        workbench.append_unit_review(
+            workspace,
+            unit["id"],
+            "approved",
+            reviewer={"type": "subagent", "name": "smoke-reviewer"},
+            evidence=["smoke fixture evidence"],
+            file_scope=[{"path": relative, "startLine": 1, "endLine": 1}],
+        )
 
 
 def check_cli(workspace, phase, expected, release=False, needle=""):
@@ -83,10 +84,11 @@ def run():
         prepare_contract(workspace)
         status_path = workspace / "project/status.json"
         approvals_path = workspace / "project/approvals.json"
-        status = json.loads(status_path.read_text(encoding="utf-8"))
         approvals = []
 
         for phase in range(6):
+            # Unit reviews rewrite status.json, so a copy held across phases would roll them back.
+            status = json.loads(status_path.read_text(encoding="utf-8"))
             status["phase"] = phase
             status["state"] = "in-review"
             write_json(status_path, status)
@@ -102,11 +104,8 @@ def run():
                 for relative in check_workspace.REQUIRED[phase]:
                     write_file(workspace, relative)
             if phase == 4:
-                units = json.loads((workspace / "src/ui/ir/manifest.json").read_text(encoding="utf-8"))["units"]
-                for unit in units:
-                    workbench.mark_unit_in_review(workspace, unit["id"], ["src/ui/units/%s/output.html" % unit["id"]])
-                manifest = json.loads((workspace / "src/ui/ir/manifest.json").read_text(encoding="utf-8"))
-                approvals.extend(unit_review(manifest, unit) for unit in manifest["units"])
+                review_units_in_order(workspace)
+                approvals = json.loads(approvals_path.read_text(encoding="utf-8"))
             if phase >= 2:
                 check_cli(workspace, phase, 1, needle="requires gate")
                 gate = "G%d" % (phase - 1)

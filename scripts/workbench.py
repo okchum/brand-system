@@ -15,6 +15,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlparse
 
+from check_workspace import review_matches
+
 ROOT = Path(__file__).resolve().parent.parent
 TEMPLATE = ROOT / "assets" / "brief.template.json"
 
@@ -96,6 +98,7 @@ def candidates(root):
 UI_STACKS = {"html-css-js", "react"}
 UI_PLATFORMS = {"web", "desktop", "ios", "android"}
 UI_UNIT_KINDS = ("page-map", "layout", "component", "page", "platform-adaptation")
+# Seeds dependsOn in a new manifest; generation and the checker both read the manifest afterwards.
 UI_UNIT_DEPENDENCIES = {
     "page-map": (),
     "layout": ("page-map",),
@@ -129,12 +132,25 @@ def _validate_ui_selection(stack_profile, platforms):
         raise ValueError("platform 不能重复")
 
 
+def unit_output_path(unit_id):
+    return "src/ui/units/%s/output.html" % unit_id
+
+
 def _manifest_payload(stack_profile, platforms):
+    # files are declared up front: they are hashed, so filling them in during progression would
+    # invalidate every review already bound to the manifest.
     return {
         "manifestVersion": "1.0.0",
         "hash": "sha256:" + ("0" * 64),
         "units": [
-            {"id": kind, "kind": kind, "status": "in-progress", "files": [], "platforms": list(platforms)}
+            {
+                "id": kind,
+                "kind": kind,
+                "status": "in-progress",
+                "files": [unit_output_path(kind)],
+                "platforms": list(platforms),
+                "dependsOn": list(UI_UNIT_DEPENDENCIES[kind]),
+            }
             for kind in UI_UNIT_KINDS
         ],
     }
@@ -203,16 +219,19 @@ def prepare_unit_generation(workspace, unit_id):
     unit = _unit_record(manifest, unit_id)
     if unit.get("status") in {"approved", "completed"}:
         raise ValueError("unit 已完成，不能重复生成")
-    approvals = _read_json(workspace / "project/approvals.json", [])
-    approved_reviews = {
-        record.get("unitId")
-        for record in approvals
-        if isinstance(record, dict) and record.get("kind") == "unit-review" and record.get("status") == "approved" and record.get("conclusion") == "approved"
-    }
+    latest_reviews = {}
+    for record in _read_json(workspace / "project/approvals.json", []):
+        if isinstance(record, dict) and record.get("kind") == "unit-review":
+            latest_reviews[record.get("unitId")] = record
     missing = []
-    for dependency_id in UI_UNIT_DEPENDENCIES[unit_id]:
+    for dependency_id in unit.get("dependsOn", []):
         dependency = _unit_record(manifest, dependency_id)
-        if dependency.get("status") != "approved" or dependency_id not in approved_reviews:
+        review = latest_reviews.get(dependency_id)
+        if (
+            dependency.get("status") not in {"approved", "completed"}
+            or not review_matches(review, manifest)
+            or review.get("conclusion") != "approved"
+        ):
             missing.append(dependency_id)
     if missing:
         raise ValueError("dependencies 未 approved: %s" % ", ".join(missing))
@@ -475,8 +494,7 @@ def start_generation(path, phase, unit_id=None):
                     if item not in workspace_files:
                         add_log("已生成：" + str(item.relative_to(path)))
                 if unit_id:
-                    unit_output = "src/ui/units/%s/output.html" % unit_id
-                    mark_unit_in_review(path, unit_id, [unit_output])
+                    mark_unit_in_review(path, unit_id, [unit_output_path(unit_id)])
                     add_log("unit %s 已进入 in-review，等待外部 subagent review。" % unit_id, "等待 unit review")
                 add_log("正在运行检查和文件验证…", "运行 Phase %d 检查" % phase)
                 check = subprocess.run(["python3", str(ROOT / "scripts/check_workspace.py"), str(path), "--phase", str(phase)], capture_output=True, text=True)
