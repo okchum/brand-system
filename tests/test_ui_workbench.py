@@ -566,6 +566,26 @@ class UiWorkbenchTest(unittest.TestCase):
             self.assertEqual(self.read(root, "project/status.json")["state"], "in-review")
             self.assertEqual(self.unit_status(workspace, "page-map")["status"], "approved")
 
+    def test_unit_progress_restore_handles_every_status_shape(self):
+        with tempfile.TemporaryDirectory() as root:
+            workspace = Path(root)
+            status_path = workspace / "project/status.json"
+            status_path.parent.mkdir(parents=True)
+            units = [{"unitId": "page-map", "status": "in-review"}]
+            cases = (
+                ({"phase": 4}, {"phase": 4, "units": [{"unitId": "page-map", "status": "approved"}]}, True, None),
+                ({"phase": 4, "units": units}, {"phase": 4}, False, units),
+                ({"phase": 4, "units": units}, {"phase": 4, "units": None}, True, units),
+                ({"phase": 4, "units": units}, {"phase": 4, "units": list(reversed(units + [{"unitId": "x", "status": "approved"}]))}, True, units),
+            )
+            for before, after, tampered, expected in cases:
+                with self.subTest(before=before, after=after):
+                    status_path.write_text(json.dumps(after), encoding="utf-8")
+                    changed = workbench._restore_unit_progress(workspace, json.dumps(before).encode("utf-8"))
+                    self.assertEqual(bool(changed), tampered)
+                    restored = json.loads(status_path.read_text(encoding="utf-8"))
+                    self.assertEqual(restored.get("units"), expected)
+
     def test_failed_phase_check_is_reported_without_failing_the_generation_job(self):
         with tempfile.TemporaryDirectory() as root:
             workspace = self.at_phase(self.init(root), 1)

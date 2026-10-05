@@ -794,8 +794,6 @@ def _restore_unit_progress(path, status_bytes):
     """
     status_path = path / "project/status.json"
     before = json.loads(status_bytes)
-    if not isinstance(before, dict) or "units" not in before:
-        return []
     try:
         current = json.loads(status_path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
@@ -804,8 +802,16 @@ def _restore_unit_progress(path, status_bytes):
     if not isinstance(current, dict):
         status_path.write_bytes(status_bytes)
         return ["project/status.json"]
-    if current.get("units") == before["units"]:
+    had_units = isinstance(before, dict) and "units" in before
+    if had_units and current.get("units") == before["units"]:
         return []
+    if not had_units:
+        # A workspace without unit progress must not gain some from a phase job: that would count as approval.
+        if "units" not in current:
+            return []
+        del current["units"]
+        _write_json(status_path, current)
+        return ["project/status.json 的 units"]
     tampered = "units" in current
     current["units"] = before["units"]
     _write_json(status_path, current)
