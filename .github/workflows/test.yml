@@ -2,10 +2,11 @@ name: test
 on: [push, pull_request]
 jobs:
   python:
-    runs-on: ubuntu-latest
+    # Python 3.9 (the floor this repo supports) has no official build for Ubuntu 26, which ubuntu-latest becomes.
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with: {python-version: '3.9'}
       - run: python -m py_compile scripts/*.py tests/*.py
       # Pyflakes rules plus E402 (imports after sys.path setup carry noqa); the compact one-line style is deliberate.
