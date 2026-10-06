@@ -407,6 +407,23 @@ class UiWorkbenchTest(unittest.TestCase):
             # The token-injected copies are scaffolding and must not stay next to the output.
             self.assertFalse(list((workspace / workbench.unit_dir("page-map")).glob(".preview-*")))
 
+    @unittest.skipUnless(REAL_CHROME(), "needs Chrome or Chromium")
+    def test_bottom_screenshot_shows_the_end_of_the_page(self):
+        # Chrome's --screenshot ignored the scroll position and returned a blank frame for "bottom".
+        blue = "<div style='height:100vh;background:#0000ff'></div>"
+        with tempfile.TemporaryDirectory() as root:
+            workspace = self.phase_four(root)
+            manifest = json.loads((workspace / "src/ui/ir/manifest.json").read_text(encoding="utf-8"))
+            style = "<meta name='viewport' content='width=device-width'><style>html{scroll-behavior:smooth}body{margin:0}</style>"
+            write_output(workspace, "page-map", style + "<div style='height:800px;background:#ff0000'></div><div style='height:2400px'></div>" + blue)
+            write_output(workspace, "layout", style + blue)
+            with mock.patch.object(workbench, "_chrome_binary", REAL_CHROME):
+                tall = {shot.name: shot.read_bytes() for shot in workbench._unit_screenshots(workspace, workbench._unit_record(manifest, "page-map"))}
+                only_blue = {shot.name: shot.read_bytes() for shot in workbench._unit_screenshots(workspace, workbench._unit_record(manifest, "layout"))}
+            for view in ("desktop", "mobile"):
+                self.assertEqual(tall[view + "-bottom.png"], only_blue[view + "-top.png"], view)
+                self.assertNotEqual(tall[view + "-top.png"], tall[view + "-bottom.png"], view)
+
     def test_unit_job_generates_then_runs_independent_read_only_review(self):
         with tempfile.TemporaryDirectory() as root:
             workspace = self.phase_four(root)

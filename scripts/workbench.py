@@ -10,6 +10,7 @@ The server only writes inside the selected workspace after an explicit UI action
 """
 import argparse
 import copy
+import base64
 import hashlib
 import json
 import os
@@ -21,6 +22,7 @@ import webbrowser
 import threading
 import time
 import subprocess
+import select
 import selectors
 import shutil
 import signal
@@ -1346,25 +1348,87 @@ def _chrome_binary():
     return next(filter(None, map(shutil.which, ("google-chrome", "chromium", "chromium-browser", "chrome"))), None)
 
 
-def _chrome_screenshot(chrome, profile, page, target, width, height):
-    """One headless screenshot. Chrome writes the file but does not always exit, so it is stopped once the file is done."""
-    proc = subprocess.Popen(
-        [chrome, "--headless=new", "--disable-gpu", "--hide-scrollbars", "--no-first-run", "--no-default-browser-check",
-         "--user-data-dir=" + profile, "--window-size=%d,%d" % (width, height), "--virtual-time-budget=3000",
-         "--screenshot=" + str(target), page.as_uri()],
-        stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
-    try:
-        deadline, size = time.time() + 60, -1
-        while time.time() < deadline:
-            current = target.stat().st_size if target.exists() else -1
-            if current > 0 and current == size or proc.poll() is not None:
-                break
-            size = current
-            time.sleep(0.5)
-    finally:
-        _stop_group(proc.pid)
-        proc.wait()
-    return target.is_file() and target.read_bytes()[:8] == b"\x89PNG\r\n\x1a\n"
+class _ChromePipe:
+    """Chrome DevTools Protocol over --remote-debugging-pipe: messages are JSON ended by NUL, commands go to the
+    browser's fd 3 and replies come back on its fd 4. Stdlib only, and unlike --screenshot it honours scrolling."""
+
+    def __init__(self, chrome, profile, deadline):
+        to_chrome, self._write = os.pipe()
+        self._read, from_chrome = os.pipe()
+        # Chrome needs exactly fds 3 and 4; a shell maps them because preexec_fn is unsafe in this threaded server.
+        args = [chrome, "--headless=new", "--disable-gpu", "--hide-scrollbars", "--no-first-run",
+                "--no-default-browser-check", "--remote-debugging-pipe", "--user-data-dir=" + profile, "about:blank"]
+        self.proc = subprocess.Popen(
+            ["/bin/sh", "-c", 'exec "$@" 3<&%d 4>&%d' % (to_chrome, from_chrome), "chrome"] + args,
+            pass_fds=(to_chrome, from_chrome), stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL, start_new_session=True)
+        os.close(to_chrome)
+        os.close(from_chrome)
+        self._buffer, self._next, self._events, self.deadline, self.session = b"", 0, [], deadline, None
+
+    def _message(self):
+        while b"\0" not in self._buffer:
+            remaining = self.deadline - time.time()
+            if remaining <= 0 or not select.select([self._read], [], [], remaining)[0]:
+                raise TimeoutError("Chrome 截图超时")
+            data = os.read(self._read, 1 << 20)
+            if not data:
+                raise RuntimeError("Chrome 意外退出")
+            self._buffer += data
+        raw, self._buffer = self._buffer.split(b"\0", 1)
+        return json.loads(raw)
+
+    def call(self, method, **params):
+        self._next += 1
+        message = {"id": self._next, "method": method, "params": params}
+        if self.session and not method.startswith(("Target.", "Browser.")):
+            message["sessionId"] = self.session
+        os.write(self._write, json.dumps(message).encode("utf-8") + b"\0")
+        while True:
+            reply = self._message()
+            if reply.get("id") == self._next:
+                if "error" in reply:
+                    raise RuntimeError("Chrome %s：%s" % (method, reply["error"].get("message")))
+                return reply.get("result", {})
+            self._events.append(reply)
+
+    def wait_event(self, method):
+        while True:
+            for i, event in enumerate(self._events):
+                if event.get("method") == method:
+                    return self._events.pop(i)
+            self._events.append(self._message())
+
+    def close(self):
+        for fd in (self._read, self._write):
+            os.close(fd)
+        _stop_group(self.proc.pid)
+        self.proc.wait()
+
+
+def _capture_views(chrome, url):
+    """{"desktop-top.png": bytes, ...} for every SCREENSHOT_VIEWS size, at the top and scrolled to the end."""
+    shots = {}
+    with tempfile.TemporaryDirectory(prefix="brand-system-chrome-") as profile:
+        browser = _ChromePipe(chrome, profile, time.time() + 90)
+        try:
+            target = browser.call("Target.createTarget", url="about:blank")["targetId"]
+            browser.session = browser.call("Target.attachToTarget", targetId=target, flatten=True)["sessionId"]
+            browser.call("Page.enable")
+            for name, width, height in SCREENSHOT_VIEWS:
+                browser.call("Emulation.setDeviceMetricsOverride", width=width, height=height, deviceScaleFactor=1, mobile=width < 600)
+                browser.call("Page.navigate", url=url)
+                browser.wait_event("Page.loadEventFired")
+                for where, top in (("top", "0"), ("bottom", "document.documentElement.scrollHeight")):
+                    # A page's own smooth scrolling would still be moving when the frame is captured.
+                    browser.call("Runtime.evaluate", awaitPromise=True, expression=(
+                        "document.documentElement.style.scrollBehavior='auto';scrollTo(0,%s);"
+                        "new Promise(r=>requestAnimationFrame(()=>requestAnimationFrame(r)))" % top))
+                    data = browser.call("Page.captureScreenshot", format="png")["data"]
+                    shots["%s-%s.png" % (name, where)] = base64.b64decode(data)
+        finally:
+            browser.close()
+    return shots
 
 
 def _unit_screenshots(path, unit):
@@ -1378,21 +1442,18 @@ def _unit_screenshots(path, unit):
     if not chrome:
         return []
     source = path / unit["files"][0]
-    html = _with_tokens(source.read_text(encoding="utf-8", errors="replace"), token_css(path))
+    # Next to the output so its relative links to dependency units still resolve.
+    page = source.with_name(".preview.html")
+    page.write_text(_with_tokens(source.read_text(encoding="utf-8", errors="replace"), token_css(path)), encoding="utf-8")
+    try:
+        captured = _capture_views(chrome, page.as_uri())
+    finally:
+        page.unlink()
     out_dir.mkdir(parents=True)
     shots = []
-    with tempfile.TemporaryDirectory(prefix="brand-system-chrome-") as profile:
-        for where, script in (("top", ""), ("bottom", "<script>addEventListener('load',()=>scrollTo(0,document.documentElement.scrollHeight))</script>")):
-            # Next to the output so its relative links to dependency units still resolve.
-            page = source.with_name(".preview-%s.html" % where)
-            page.write_text(html + script, encoding="utf-8")
-            try:
-                for name, width, height in SCREENSHOT_VIEWS:
-                    target = out_dir / ("%s-%s.png" % (name, where))
-                    if _chrome_screenshot(chrome, profile, page, target, width, height):
-                        shots.append(target)
-            finally:
-                page.unlink()
+    for name, data in captured.items():
+        (out_dir / name).write_bytes(data)
+        shots.append(out_dir / name)
     return shots
 
 
