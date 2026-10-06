@@ -9,6 +9,7 @@ Usage: python3 scripts/workbench.py [DIRECTORY] [--port PORT] [--open] [--worksp
 The server only writes inside the selected workspace after an explicit UI action.
 """
 import argparse
+import collections
 import copy
 import errno
 import base64
@@ -121,6 +122,14 @@ def _read_json(path, default=None):
 
 
 _DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+# Scratch files the workbench writes outside the workspace. codex's workspace-write sandbox can write the workspace,
+# $TMPDIR and /tmp, so none of those can hold files an agent must not swap; the user's cache directory is outside it.
+SCRATCH_ROOT = Path(os.environ.get("XDG_CACHE_HOME") or Path.home() / ".cache") / "brand-system"
+
+
+def _scratch_dir(prefix):
+    SCRATCH_ROOT.mkdir(parents=True, exist_ok=True, mode=0o700)
+    return tempfile.mkdtemp(prefix=prefix, dir=SCRATCH_ROOT)
 
 
 def _open_dir(directory, create=True):
@@ -128,7 +137,8 @@ def _open_dir(directory, create=True):
 
     The workbench is not sandboxed, but a process an agent leaves running can swap any directory in the workspace
     for a link at any moment; checking a path and then writing to it would follow that link out of the workspace.
-    Workspace paths are resolved before use, so a link on the way can only have been planted."""
+    Every helper below that takes a path relies on this, so their callers pass resolved paths (each public entry
+    point resolves the workspace first); a link anywhere on the way can then only have been planted."""
     fd = os.open("/", _DIR_FLAGS)
     try:
         for part in Path(directory).absolute().parts[1:]:
@@ -137,14 +147,17 @@ def _open_dir(directory, create=True):
             except FileNotFoundError:
                 if not create:
                     raise
-                os.mkdir(part, 0o755, dir_fd=fd)
+                try:
+                    os.mkdir(part, 0o755, dir_fd=fd)
+                except FileExistsError:
+                    pass  # someone else made it meanwhile; the open below still refuses a link
                 child = os.open(part, _DIR_FLAGS, dir_fd=fd)
             os.close(fd)
             fd = child
     except OSError as exc:
         os.close(fd)
         if exc.errno in (errno.ELOOP, errno.ENOTDIR):
-            raise ValueError("%s 的路径上有链接，拒绝在这里写入或删除" % directory) from exc
+            raise ValueError("%s 的路径上有链接或文件，不是真实目录，拒绝在这里写入或删除" % directory) from exc
         raise
     return fd
 
@@ -170,12 +183,18 @@ def _remove_entry(dir_fd, name):
 
 
 def _remove(target):
+    """Delete target, file or directory tree, through directory handles. Very deep trees an agent built can run
+    out of handles; that is reported as a refusal rather than half done silently."""
     try:
         fd = _open_dir(target.parent, create=False)
     except FileNotFoundError:
         return
     try:
         _remove_entry(fd, target.name)
+    except (RecursionError, OSError) as exc:
+        if isinstance(exc, OSError) and exc.errno != errno.EMFILE:
+            raise
+        raise ValueError("%s 的目录层级过深，拒绝删除" % target) from exc
     finally:
         os.close(fd)
 
@@ -193,12 +212,23 @@ def _write_new(target, data):
 
 
 def _write_atomic(target, data):
-    # Write then rename, so a concurrent /api/state poll never reads half a file. The rename takes paths (this
-    # Python has no renameat); if the parent became a link meanwhile, the temporary file is not behind it and
-    # the rename fails rather than writing outside.
-    temporary = target.with_name(target.name + ".tmp")
-    _write_new(temporary, data)
-    os.replace(temporary, target)
+    """Write then rename, so a concurrent /api/state poll never reads half a file. Both steps happen inside one
+    directory handle, and the rename only goes ahead if the temporary file is still the one just written: a link
+    swapped in at that name would otherwise become the target, and later reads would follow it out."""
+    temporary = target.name + ".tmp"
+    fd = _open_dir(target.parent)
+    try:
+        _remove_entry(fd, temporary)
+        out = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o644, dir_fd=fd)
+        with os.fdopen(out, "wb") as handle:
+            handle.write(data)
+            written = os.fstat(handle.fileno()).st_ino
+        if os.stat(temporary, dir_fd=fd, follow_symlinks=False).st_ino != written:
+            raise ValueError("%s 的临时文件在写入后被替换，拒绝使用" % target)
+        # os.replace takes dir_fd here even though os.supports_dir_fd lists only os.rename.
+        os.replace(temporary, target.name, src_dir_fd=fd, dst_dir_fd=fd)
+    finally:
+        os.close(fd)
 
 
 def _write_json(path, payload):
@@ -206,13 +236,8 @@ def _write_json(path, payload):
 
 
 def _unit_path(path, unit_id):
-    """The unit's directory for the workbench to write in. The agent can replace it, or a parent, with a link
-    out of the workspace, and the workbench itself is not sandboxed, so such a directory is refused."""
-    target = path / unit_dir(unit_id)
-    links = [item for item in (target, *target.parents) if item != path and item.is_relative_to(path) and item.is_symlink()]
-    if links or not target.resolve().is_relative_to(path.resolve()):
-        raise ValueError("unit %s 的目录被换成了链接，拒绝写入" % unit_id)
-    return target
+    """The unit's directory; writes into it go through _open_dir, which refuses it if it has become a link."""
+    return path / unit_dir(unit_id)
 
 
 def _validate_ui_selection(stack_profile, platforms):
@@ -988,8 +1013,9 @@ def _unit_feedback(path, unit_id):
 
 
 # What a unit page may write instead of a token, shared by the generation and review prompts.
-TOKEN_USE_RULE = ("页面只写 var(--…)，不要 fetch token 文件，不要重新声明这些变量或内联数值；页面可以声明自己的局部变量，"
-                  "但只能由这些 token 变量组成，不能承载颜色、字号、间距的数值；0、auto、100%、inherit、none 这类不是设计取值的写法不需要 token。")
+TOKEN_USE_RULE = ("颜色、字号、间距只引用 tokens/src 的 token：页面只写 var(--…)，不要 fetch token 文件，不要重新声明这些变量或内联数值；"
+                  "页面可以声明自己的局部变量，但只能由这些 token 变量组成，不能承载颜色、字号、间距的数值；"
+                  "0、auto、100%、inherit、none 这类不是设计取值的写法不需要 token，审查时不算问题。")
 
 
 def _token_rule(path):
@@ -1006,13 +1032,13 @@ def _unit_prompt(path, unit, choice):
     ui = _read_json(path / "config/ui.json", {})
     units = {item["id"]: item for item in _read_json(path / "src/ui/ir/manifest.json").get("units", [])}
     inputs = "、".join(file for dep in unit.get("dependsOn", []) for file in units.get(dep, {}).get("files", [])) or "无"
-    return f"""只完成 UI unit「{unit['id']}」（类型 {unit.get('kind')}），把页面写到 {'、'.join(unit['files'])}。只写入 {unit_dir(unit['id'])}/ 目录；不要修改 project/、config/、src/ui/ir/、tokens/ 以及其他 unit 的目录。读取 src/ui/ir/manifest.json、config/ui.json、brand.brief.json、tokens/src/，以及依赖 unit 的输出：{inputs}。按 {ROOT / "references/ui.md"} 中该类型的要求完成（该文件只读）；颜色、字号、间距只引用 tokens/src 的 token，不复制数值。{_token_rule(path)}{TOKEN_USE_RULE}目标平台：{'、'.join(ui.get('platforms', []))}；技术栈：{ui.get('stackProfile', '')}；Desktop 与 Mobile 以 Web preview 呈现，同时写清平台语义，方便转换为 native 代码。品牌方向为 Direction {choice}。{_unit_feedback(path, unit['id'])}不要只解释，直接创建文件。"""
+    return f"""只完成 UI unit「{unit['id']}」（类型 {unit.get('kind')}），把页面写到 {'、'.join(unit['files'])}。只写入 {unit_dir(unit['id'])}/ 目录；不要修改 project/、config/、src/ui/ir/、tokens/ 以及其他 unit 的目录。读取 src/ui/ir/manifest.json、config/ui.json、brand.brief.json、tokens/src/，以及依赖 unit 的输出：{inputs}。按 {ROOT / "references/ui.md"} 中该类型的要求完成（该文件只读）；{_token_rule(path)}{TOKEN_USE_RULE}目标平台：{'、'.join(ui.get('platforms', []))}；技术栈：{ui.get('stackProfile', '')}；Desktop 与 Mobile 以 Web preview 呈现，同时写清平台语义，方便转换为 native 代码。品牌方向为 Direction {choice}。{_unit_feedback(path, unit['id'])}不要只解释，直接创建文件。"""
 
 
 def _visual_rule(path, shots):
     if not shots:
         return "本次没有视觉截图，只能从源码判断视觉。"
-    sizes = "、".join("%s %d×%d" % view[1:] for view in SCREENSHOT_VIEWS)
+    sizes = "、".join("%s %d×%d" % (view.label, view.width, view.height) for view in SCREENSHOT_VIEWS)
     return ("截图文件（" + "、".join(str(shot.relative_to(path)) for shot in shots) + "，可直接打开查看）是工作台预览在 "
             + sizes + " 下页面顶部和滚到底部的实际渲染。"
             "对照截图检查整体视觉：区块在页面下半段断开或留白、元素重叠或溢出、文字被截断、对齐与留白、层级是否清楚；按实际影响定级。")
@@ -1094,7 +1120,7 @@ def _restore(path, roots, before, excluded=None):
     changed = sorted(rel for rel in set(before) | set(after) if before.get(rel) != after.get(rel))
     if not changed:
         return []
-    backup = Path(tempfile.mkdtemp(prefix="brand-system-restore-"))
+    backup = Path(_scratch_dir("restore-"))
     reported = []
     # Copy everything out before touching anything: removing a replaced directory below also removes its files.
     for rel in changed:
@@ -1242,13 +1268,13 @@ def _run_agent_command(cmd, path, setting):
     if setting["engine"] != "claude":
         _run_agent(cmd, path, AGENT_TIMEOUT)
         return None
-    handle, output_path = tempfile.mkstemp(prefix="brand-system-claude-", suffix=".json")
-    os.close(handle)
+    scratch = _scratch_dir("claude-")
     try:
+        output_path = Path(scratch) / "result.json"
         _run_agent(cmd, path, AGENT_TIMEOUT, output_path=output_path)
         return _claude_result(output_path)
     finally:
-        os.unlink(output_path)
+        shutil.rmtree(scratch, ignore_errors=True)
 
 
 def _agent_identity(setting, claude_data=None):
@@ -1283,7 +1309,8 @@ def _review_unit(job_id, path, unit_id):
     _job_log(job_id, "正在启动独立审查进程（%s，只读）…" % setting["engine"], "审查 unit %s" % unit_id)
     # The codex CLI writes its last message itself, outside its sandbox; it gets a file outside the workspace so
     # nothing an agent planted there can redirect it. The workbench copies the verdict in afterwards.
-    with tempfile.TemporaryDirectory(prefix="brand-system-verdict-") as scratch:
+    scratch = _scratch_dir("verdict-")
+    try:
         output = Path(scratch) / "review.json"
         cmd = _agent_command(path, setting, _review_prompt(path, unit, shots), verdict_path=output, images=shots)
         claude_data = _run_agent_command(cmd, path, setting)
@@ -1294,8 +1321,10 @@ def _review_unit(job_id, path, unit_id):
                     verdict = json.loads(claude_data.get("result") or "")
             else:
                 verdict = json.loads(output.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
+        except (OSError, ValueError, TypeError):
             raise ValueError("审查进程没有给出可读的结论")
+    finally:
+        shutil.rmtree(scratch, ignore_errors=True)
     _write_json(verdict_path, verdict)
     findings = verdict.get("findings") if isinstance(verdict, dict) else None
     if (
@@ -1494,16 +1523,50 @@ def token_css(path):
     return ":root{" + "".join(_token_declarations(path)[0]) + "}"
 
 
+RAW_TEXT_ELEMENTS = ("script", "style", "title", "textarea")
+
+
+def _head_insert_at(html):
+    """Index just after the page's <head ...> (or after the doctype when there is no head), else 0.
+
+    One forward scan: comments and raw-text elements are skipped as text, and an unclosed one ends the search,
+    so an agent's page cannot make this slow the way backtracking regexes were."""
+    lower, after_doctype, i = html.lower(), 0, 0
+    while True:
+        i = lower.find("<", i)
+        if i < 0:
+            return after_doctype
+        if lower.startswith("<!--", i):
+            end = lower.find("-->", i + 4)
+            if end < 0:
+                return after_doctype
+            i = end + 3
+            continue
+        name = re.match(r"<([a-z!][a-z0-9-]*)", lower[i:i + 32])
+        tag = name.group(1) if name else ""
+        end = lower.find(">", i)
+        if end < 0:
+            return after_doctype
+        if tag == "head":
+            return end + 1
+        if tag == "!doctype":
+            after_doctype = end + 1
+        elif tag in RAW_TEXT_ELEMENTS:
+            close = lower.find("</" + tag, end)
+            if close < 0:
+                return after_doctype
+            end = close
+        i = end + 1
+
+
 def _with_tokens(html, css):
-    tag = "<style data-brand-tokens>%s</style>" % css
-    # Inside <head> when there is one; never before the doctype, which would put the page in quirks mode. A
-    # "<head>" inside a comment or a script is text, so those spans are blanked out before searching.
-    masked = re.sub(r"<!--.*?-->|<script\b.*?</script\s*>", lambda m: " " * len(m.group()), html, flags=re.IGNORECASE | re.DOTALL)
-    match = re.search(r"<head(?:\s[^>]*)?>", masked, re.IGNORECASE) or re.search(r"<!doctype[^>]*>", masked, re.IGNORECASE)
-    return html[:match.end()] + tag + html[match.end():] if match else tag + html
+    # Inside <head> when there is one; never before the doctype, which would put the page in quirks mode.
+    at = _head_insert_at(html)
+    return html[:at] + "<style data-brand-tokens>%s</style>" % css + html[at:]
 
 
-SCREENSHOT_VIEWS = (("desktop", "桌面", 1280, 800), ("mobile", "手机", 390, 844))
+ScreenshotView = collections.namedtuple("ScreenshotView", "name label width height")
+SCREENSHOT_VIEWS = (ScreenshotView("desktop", "桌面", 1280, 800), ScreenshotView("mobile", "手机", 390, 844))
 
 
 def _chrome_binary():
@@ -1581,14 +1644,15 @@ class _ChromePipe:
 def _capture_views(chrome, url):
     """{"desktop-top.png": bytes, ...} for every SCREENSHOT_VIEWS size, at the top and scrolled to the end."""
     shots = {}
-    with tempfile.TemporaryDirectory(prefix="brand-system-chrome-") as profile:
+    profile = _scratch_dir("chrome-")
+    try:
         browser = _ChromePipe(chrome, profile, time.time() + 90)
         try:
             target = browser.call("Target.createTarget", url="about:blank")["targetId"]
             browser.session = browser.call("Target.attachToTarget", targetId=target, flatten=True)["sessionId"]
             browser.call("Page.enable")
-            for name, _label, width, height in SCREENSHOT_VIEWS:
-                browser.call("Emulation.setDeviceMetricsOverride", width=width, height=height, deviceScaleFactor=1, mobile=width < 600)
+            for view in SCREENSHOT_VIEWS:
+                browser.call("Emulation.setDeviceMetricsOverride", width=view.width, height=view.height, deviceScaleFactor=1, mobile=view.width < 600)
                 browser.call("Page.navigate", url=url)
                 browser.wait_event("Page.loadEventFired")
                 for where, top in (("top", "0"), ("bottom", "document.documentElement.scrollHeight")):
@@ -1597,9 +1661,11 @@ def _capture_views(chrome, url):
                         "document.documentElement.style.scrollBehavior='auto';scrollTo(0,%s);"
                         "new Promise(r=>requestAnimationFrame(()=>requestAnimationFrame(r)))" % top))
                     data = browser.call("Page.captureScreenshot", format="png")["data"]
-                    shots["%s-%s.png" % (name, where)] = base64.b64decode(data)
+                    shots["%s-%s.png" % (view.name, where)] = base64.b64decode(data)
         finally:
             browser.close()
+    finally:
+        shutil.rmtree(profile, ignore_errors=True)
     return shots
 
 

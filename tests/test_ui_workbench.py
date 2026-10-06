@@ -22,6 +22,14 @@ import workbench  # noqa: E402
 # Unit tests must not start a real browser; the one test that needs Chrome restores this.
 REAL_CHROME = workbench._chrome_binary
 workbench._chrome_binary = lambda: None
+# Restore backups and agent scratch files go to a throwaway directory, not the user's cache.
+REAL_SCRATCH_ROOT = workbench.SCRATCH_ROOT
+TEST_SCRATCH = tempfile.mkdtemp(prefix="brand-system-test-scratch-")
+workbench.SCRATCH_ROOT = Path(TEST_SCRATCH).resolve()
+
+
+def tearDownModule():
+    shutil.rmtree(TEST_SCRATCH, ignore_errors=True)
 
 G1_APPROVED = {
     "kind": "gate", "gate": "G1", "status": "approved", "scope": "strategy",
@@ -49,7 +57,8 @@ def current_output_hash(workspace, unit_id):
 def remove_backup(report):
     """Delete the temp directory a restore report points at, and nothing else."""
     saved = Path(re.search(r"保存到 (.+)）", report).group(1))
-    backup = next(parent for parent in saved.parents if parent.name.startswith("brand-system-restore-"))
+    backup = next(parent for parent in saved.parents
+                  if parent.name.startswith("restore-") and parent.parent == workbench.SCRATCH_ROOT)
     shutil.rmtree(backup)
 
 
@@ -454,6 +463,26 @@ class UiWorkbenchTest(unittest.TestCase):
             self.assertEqual(victim.read_text(encoding="utf-8"), "keep")
             self.assertFalse((workspace / "project/status.json").is_symlink())
             self.assertEqual((workspace / "project/status.json").read_bytes(), before)
+
+    def test_workbench_scratch_files_live_where_the_agent_sandbox_cannot_write(self):
+        # codex's workspace-write sandbox can write $TMPDIR and /tmp, so they are no safer than the workspace.
+        with tempfile.TemporaryDirectory() as root:
+            workspace = self.phase_four(root)
+            verdict = {"conclusion": "approved", "summary": "ok", "findings": []}
+            job, calls = self.run_unit_job(workspace, "page-map", verdict=verdict)
+            output = Path(calls[1][calls[1].index("-o") + 1]).resolve()
+            self.assertTrue(output.is_relative_to(workbench.SCRATCH_ROOT), output)
+            self.assertFalse(output.exists())
+        for shared in (Path(tempfile.gettempdir()).resolve(), Path("/tmp").resolve()):
+            self.assertFalse(REAL_SCRATCH_ROOT.resolve().is_relative_to(shared), REAL_SCRATCH_ROOT)
+
+    def test_claude_result_that_is_not_text_is_reported_as_unreadable(self):
+        with tempfile.TemporaryDirectory() as root:
+            workspace = self.phase_four(root, agents={"review": {"engine": "claude"}})
+            with mock.patch.object(workbench, "_run_agent_command", side_effect=[None, {"result": 5}]):
+                write_output(workspace, "page-map")
+                job = wait_for(workbench.start_unit_job(workspace, 4, "page-map"))
+            self.assertIn("审查进程没有给出可读的结论", job["error"])
 
     def test_codex_writes_its_verdict_outside_the_workspace(self):
         with tempfile.TemporaryDirectory() as root:
@@ -1373,6 +1402,16 @@ class UiWorkbenchHttpTest(unittest.TestCase):
             self.assertTrue(workbench._css_value_safe(value), value)
         for value in rejected:
             self.assertFalse(workbench._css_value_safe(value), value)
+
+    def test_token_insertion_is_linear_on_unclosed_tags(self):
+        for junk in ("<script ", "<!--", "<head ", "<title>"):
+            started = time.time()
+            workbench._with_tokens(junk * 40000, ":root{}")
+            self.assertLess(time.time() - started, 1, junk)
+
+    def test_tokens_skip_a_head_tag_inside_raw_text_elements(self):
+        for html in ("<script>var a='<head>'", "<title><head>", "<textarea><head x>", "<!-- <head>", "<style>a{}<head>"):
+            self.assertTrue(workbench._with_tokens(html, ":root{}").startswith("<style data-brand-tokens>"), html)
 
     def test_tokens_skip_a_head_tag_inside_a_comment_or_script(self):
         css = ":root{}"

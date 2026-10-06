@@ -51,6 +51,7 @@ def review_units_in_order(workspace):
     """Drive every unit through the workbench's real job path (claim, snapshot, generate, review, record)."""
     workbench._run_agent = stand_in_codex
     workbench._chrome_binary = lambda: None  # no real browser in the smoke run
+    workbench.SCRATCH_ROOT = Path(tempfile.mkdtemp(prefix="brand-system-smoke-scratch-"))  # keep the user's cache clean
     units = json.loads((workspace / "src/ui/ir/manifest.json").read_text(encoding="utf-8"))["units"]
     for unit in units:
         job_id = workbench.start_unit_job(workspace, 4, unit["id"])
