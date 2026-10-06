@@ -481,6 +481,8 @@ class UiWorkbenchTest(unittest.TestCase):
             self.assertEqual(job["status"], "error")
             self.assertIn("Not logged in", job["error"])
             self.assertEqual(self.unit_status(workspace, "page-map")["status"], "in-progress")
+            # The state stays in-progress, but nothing runs: the page must not say it is generating.
+            self.assertFalse(workbench.unit_overview(workspace)["units"][0]["running"])
 
     def test_codex_model_and_effort_are_passed_and_recorded(self):
         with tempfile.TemporaryDirectory() as root:
@@ -846,6 +848,20 @@ class UiWorkbenchRobustnessTest(unittest.TestCase):
             with self.assertRaises(TimeoutError):
                 workbench._run_agent([sys.executable, "-c", script], cwd, 1)
         self.assertLess(time.time() - started, 10)
+
+    def test_failed_agent_reports_what_it_said(self):
+        # A real codex run exited 1 mid-unit and the page showed only the exit code, so a usage limit
+        # could not be told apart from a crash.
+        events = [{"type": "turn.started"}, {"type": "error", "message": "You've hit your usage limit."},
+                  {"type": "turn.failed", "error": {"message": "You've hit your usage limit."}}]
+        script = "import json; [print(json.dumps(e)) for e in %r]; raise SystemExit(1)" % events
+        with tempfile.TemporaryDirectory() as cwd:
+            with self.assertRaises(RuntimeError) as caught:
+                workbench._run_agent([sys.executable, "-c", script], cwd, 10)
+            self.assertIn("usage limit", str(caught.exception))
+            with self.assertRaises(RuntimeError) as caught:
+                workbench._run_agent([sys.executable, "-c", "print('boom: network down'); raise SystemExit(2)"], cwd, 10)
+            self.assertIn("boom: network down", str(caught.exception))
 
     def test_background_commands_stop_with_the_agent(self):
         with tempfile.TemporaryDirectory() as cwd:

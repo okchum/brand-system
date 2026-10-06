@@ -363,7 +363,8 @@ def unit_overview(path):
         phase_blocker = ""
     except ValueError as exc:
         phase_blocker = str(exc)
-    busy = _running_job(path)
+    active = _active_job(path)
+    busy = active["id"] if active else None
     overview = []
     for unit in manifest["units"]:
         state = states.get(unit["id"], NOT_STARTED)
@@ -373,6 +374,8 @@ def unit_overview(path):
             "id": unit["id"],
             "kind": unit.get("kind"),
             "status": state,
+            # in-progress also survives a failed run; only this says a job is generating the unit now.
+            "running": bool(active and active.get("unitId") == unit["id"]),
             "note": notes.get(unit["id"]) or "",
             "dependsOn": unit.get("dependsOn", []),
             "blockedBy": blocked_by,
@@ -574,7 +577,29 @@ def _run_agent(cmd, cwd, timeout, output_path=None):
         AGENT_GROUPS.discard(proc.pid)
         if output_path:
             Path(output_path).write_text(b"".join(chunks).decode("utf-8", "replace"), encoding="utf-8")
+    if code != 0:
+        # The exit code alone cannot tell a usage limit from a crash; the agent's own last words can.
+        said = _agent_error(b"".join(chunks).decode("utf-8", "replace"))
+        raise RuntimeError("%s 退出码 %d%s" % (cmd[0], code, "：" + said if said else ""))
     return code
+
+
+def _agent_error(output):
+    """The error an agent printed last: codex --json error events, Claude's is_error result, else its last line."""
+    lines = [line.strip() for line in output.splitlines() if line.strip()]
+    for line in reversed(lines):
+        try:
+            event = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(event, dict):
+            continue
+        error = event.get("error") if isinstance(event.get("error"), dict) else {}
+        message = (event.get("message") if event.get("type") == "error" else None) or error.get("message") \
+            or (event.get("result") if event.get("is_error") else None)
+        if isinstance(message, str) and message.strip():
+            return message.strip()[:300]
+    return lines[-1][:300] if lines else ""
 
 
 def _claude_result(output_path):
