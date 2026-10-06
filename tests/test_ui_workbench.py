@@ -420,6 +420,51 @@ class UiWorkbenchTest(unittest.TestCase):
             self.assertIn("Chrome 截图超时", "\n".join(job["logs"]))
             self.assertIn("没有视觉截图", calls[1][-1])
 
+    def test_a_parent_swapped_for_a_link_after_the_check_is_never_written_through(self):
+        # A process the agent left running can swap a directory for a link between any check and the write.
+        with tempfile.TemporaryDirectory() as root, tempfile.TemporaryDirectory() as outside:
+            workspace = self.phase_four(root)
+            unit_path = workspace / workbench.unit_dir("page-map")
+            unit_path.mkdir(parents=True, exist_ok=True)
+            shutil.rmtree(unit_path)
+            unit_path.symlink_to(Path(outside).resolve())
+            for write in (lambda: workbench._write_json(unit_path / "metadata.json", {"x": 1}),
+                          lambda: workbench._write_new(unit_path / "screenshots/desktop-top.png", b"png"),
+                          lambda: workbench._remove(unit_path / "victim.txt")):
+                (Path(outside) / "victim.txt").write_text("keep", encoding="utf-8")
+                with self.assertRaises(ValueError):
+                    write()
+                self.assertEqual(sorted(p.name for p in Path(outside).iterdir()), ["victim.txt"])
+
+    def test_restoring_status_replaces_a_link_instead_of_writing_through_it(self):
+        with tempfile.TemporaryDirectory() as root, tempfile.TemporaryDirectory() as outside:
+            workspace = self.phase_four(root)
+            victim = Path(outside) / "victim.txt"
+            victim.write_text("keep", encoding="utf-8")
+            before = (workspace / "project/status.json").read_bytes()
+
+            def link_then_fail(cmd, cwd, timeout):
+                status_path = Path(cwd) / "project/status.json"
+                status_path.unlink()
+                status_path.symlink_to(victim)
+                raise TimeoutError("codex 进程超过 30 分钟未完成")
+            with mock.patch.object(workbench, "_run_agent", side_effect=link_then_fail):
+                job = wait_for(workbench.start_generation(workspace, 4))
+            self.assertEqual(job["status"], "error")
+            self.assertEqual(victim.read_text(encoding="utf-8"), "keep")
+            self.assertFalse((workspace / "project/status.json").is_symlink())
+            self.assertEqual((workspace / "project/status.json").read_bytes(), before)
+
+    def test_codex_writes_its_verdict_outside_the_workspace(self):
+        with tempfile.TemporaryDirectory() as root:
+            workspace = self.phase_four(root)
+            verdict = {"conclusion": "approved", "summary": "ok", "findings": []}
+            job, calls = self.run_unit_job(workspace, "page-map", verdict=verdict)
+            self.assertEqual(job["status"], "done", job)
+            output = Path(calls[1][calls[1].index("-o") + 1])
+            self.assertFalse(output.resolve().is_relative_to(workspace.resolve()))
+            self.assertEqual(json.loads((workspace / workbench.unit_dir("page-map") / "review.json").read_text(encoding="utf-8"))["summary"], "ok")
+
     def test_review_is_given_the_preview_screenshots(self):
         with tempfile.TemporaryDirectory() as root:
             workspace = self.phase_four(root)
@@ -889,7 +934,7 @@ class UiWorkbenchTest(unittest.TestCase):
 
     def test_unit_progress_restore_handles_every_status_shape(self):
         with tempfile.TemporaryDirectory() as root:
-            workspace = Path(root)
+            workspace = Path(root).resolve()
             status_path = workspace / "project/status.json"
             status_path.parent.mkdir(parents=True)
             units = [{"unitId": "page-map", "status": "in-review"}]
@@ -1028,7 +1073,7 @@ class UiWorkbenchRobustnessTest(unittest.TestCase):
 
     def test_restore_replaces_a_symlink_instead_of_writing_through_it(self):
         with tempfile.TemporaryDirectory() as root, tempfile.TemporaryDirectory() as elsewhere:
-            workspace = Path(root)
+            workspace = Path(root).resolve()
             (workspace / "project").mkdir()
             (workspace / "project/approvals.json").write_text("[]", encoding="utf-8")
             outside = Path(elsewhere) / "dotfile"
@@ -1044,7 +1089,7 @@ class UiWorkbenchRobustnessTest(unittest.TestCase):
 
     def test_restore_does_not_write_through_a_swapped_root(self):
         with tempfile.TemporaryDirectory() as root, tempfile.TemporaryDirectory() as elsewhere:
-            workspace = Path(root)
+            workspace = Path(root).resolve()
             (workspace / "project/sub").mkdir(parents=True)
             (workspace / "project/top.txt").write_text("mine", encoding="utf-8")
             (workspace / "project/sub/a.txt").write_text("a", encoding="utf-8")
@@ -1060,7 +1105,7 @@ class UiWorkbenchRobustnessTest(unittest.TestCase):
 
     def test_restore_never_deletes_through_a_linked_parent(self):
         with tempfile.TemporaryDirectory() as root, tempfile.TemporaryDirectory() as elsewhere:
-            workspace = Path(root)
+            workspace = Path(root).resolve()
             (workspace / "src/ui/ir").mkdir(parents=True)
             (workspace / "src/ui/ir/manifest.json").write_text("{}", encoding="utf-8")
             (Path(elsewhere) / "ir/sub").mkdir(parents=True)
@@ -1085,7 +1130,7 @@ class UiWorkbenchRobustnessTest(unittest.TestCase):
 
     def test_backups_of_a_link_and_a_same_named_file_do_not_collide(self):
         with tempfile.TemporaryDirectory() as root:
-            workspace = Path(root)
+            workspace = Path(root).resolve()
             (workspace / "project").mkdir()
             before = workbench._snapshot(workspace, ("project",))
             (workspace / "project/x").symlink_to("target")
@@ -1100,7 +1145,7 @@ class UiWorkbenchRobustnessTest(unittest.TestCase):
 
     def test_restore_brings_back_an_existing_symlink_as_a_symlink(self):
         with tempfile.TemporaryDirectory() as root:
-            workspace = Path(root)
+            workspace = Path(root).resolve()
             (workspace / "project").mkdir()
             (workspace / "project/top.txt").write_text("mine", encoding="utf-8")
             (workspace / "project/ln").symlink_to("top.txt")
@@ -1113,7 +1158,7 @@ class UiWorkbenchRobustnessTest(unittest.TestCase):
 
     def test_restore_keeps_a_copy_of_what_it_overwrites(self):
         with tempfile.TemporaryDirectory() as root:
-            workspace = Path(root)
+            workspace = Path(root).resolve()
             (workspace / "project").mkdir()
             (workspace / "project/approvals.json").write_text("[]", encoding="utf-8")
             before = workbench._snapshot(workspace, ("project",))

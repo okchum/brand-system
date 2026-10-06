@@ -10,6 +10,7 @@ The server only writes inside the selected workspace after an explicit UI action
 """
 import argparse
 import copy
+import errno
 import base64
 import hashlib
 import json
@@ -26,6 +27,7 @@ import select
 import selectors
 import shutil
 import signal
+import stat
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlencode, urlparse
@@ -118,21 +120,89 @@ def _read_json(path, default=None):
         raise
 
 
+_DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+
+
+def _open_dir(directory, create=True):
+    """A handle on directory, reached from / one component at a time without following any link.
+
+    The workbench is not sandboxed, but a process an agent leaves running can swap any directory in the workspace
+    for a link at any moment; checking a path and then writing to it would follow that link out of the workspace.
+    Workspace paths are resolved before use, so a link on the way can only have been planted."""
+    fd = os.open("/", _DIR_FLAGS)
+    try:
+        for part in Path(directory).absolute().parts[1:]:
+            try:
+                child = os.open(part, _DIR_FLAGS, dir_fd=fd)
+            except FileNotFoundError:
+                if not create:
+                    raise
+                os.mkdir(part, 0o755, dir_fd=fd)
+                child = os.open(part, _DIR_FLAGS, dir_fd=fd)
+            os.close(fd)
+            fd = child
+    except OSError as exc:
+        os.close(fd)
+        if exc.errno in (errno.ELOOP, errno.ENOTDIR):
+            raise ValueError("%s 的路径上有链接，拒绝在这里写入或删除" % directory) from exc
+        raise
+    return fd
+
+
+def _remove_entry(dir_fd, name):
+    """Remove name inside dir_fd; a directory is emptied through handles too, so no link in it is followed."""
+    try:
+        mode = os.stat(name, dir_fd=dir_fd, follow_symlinks=False).st_mode
+    except FileNotFoundError:
+        return
+    if not stat.S_ISDIR(mode):
+        os.unlink(name, dir_fd=dir_fd)
+        return
+    child = os.open(name, _DIR_FLAGS, dir_fd=dir_fd)
+    try:
+        with os.scandir(child) as entries:
+            names = [entry.name for entry in entries]
+        for entry in names:
+            _remove_entry(child, entry)
+    finally:
+        os.close(child)
+    os.rmdir(name, dir_fd=dir_fd)
+
+
+def _remove(target):
+    try:
+        fd = _open_dir(target.parent, create=False)
+    except FileNotFoundError:
+        return
+    try:
+        _remove_entry(fd, target.name)
+    finally:
+        os.close(fd)
+
+
 def _write_new(target, data):
-    """Create target afresh. Whatever sits at that name, including a link an agent planted, is removed, never written through."""
-    if target.is_symlink() or target.exists():
-        target.unlink()
-    fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o644)
-    with os.fdopen(fd, "wb") as handle:
-        handle.write(data)
+    """Create target afresh inside its real directory; whatever sits at that name, a planted link included, is removed."""
+    fd = _open_dir(target.parent)
+    try:
+        _remove_entry(fd, target.name)
+        out = os.open(target.name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o644, dir_fd=fd)
+        with os.fdopen(out, "wb") as handle:
+            handle.write(data)
+    finally:
+        os.close(fd)
+
+
+def _write_atomic(target, data):
+    # Write then rename, so a concurrent /api/state poll never reads half a file. The rename takes paths (this
+    # Python has no renameat); if the parent became a link meanwhile, the temporary file is not behind it and
+    # the rename fails rather than writing outside.
+    temporary = target.with_name(target.name + ".tmp")
+    _write_new(temporary, data)
+    os.replace(temporary, target)
 
 
 def _write_json(path, payload):
-    # Write then rename, so a concurrent /api/state poll never reads half a file.
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_name(path.name + ".tmp")
-    _write_new(temporary, (json.dumps(payload, ensure_ascii=False, indent=2) + "\n").encode("utf-8"))
-    os.replace(temporary, path)
+    _write_atomic(path, (json.dumps(payload, ensure_ascii=False, indent=2) + "\n").encode("utf-8"))
 
 
 def _unit_path(path, unit_id):
@@ -464,7 +534,7 @@ def _init_workspace(path, official, one_liner, source_path, capabilities, stack_
         brief["product"]["capabilities"] = capabilities or []
         brief["name"]["final"] = bool(official)
         brief["constraints"]["frontend"].update(platforms=list(selected_platforms), stackProfile=stack_profile)
-        (path / "brand.brief.json").write_text(json.dumps(brief, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        _write_json(path / "brand.brief.json", brief)
     files = {
         "README.md": "# Brand workspace\n\nManaged by brand-system workbench.\n",
         "project/plan.md": "# Plan\n\nComplete brief, strategy, and three directions before G1.\n",
@@ -479,16 +549,14 @@ def _init_workspace(path, official, one_liner, source_path, capabilities, stack_
     for rel, content in files.items():
         target = path / rel
         if not target.exists():
-            target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_text(content, encoding="utf-8")
+            _write_new(target, content.encode("utf-8"))
     if source_path and not (path / "project/source.json").exists():
         count = sum(1 for item in source.rglob("*") if item.is_file() and ".git" not in item.parts)
         references = path / "docs/references.md"
         if not references.exists() or references.read_text(encoding="utf-8").startswith("# References\n\nNo external"):
-            references.write_text(
+            _write_new(references, (
                 "# References\n\nAI reference source directory (read-only): `%s`\n\n"
-                "Files available at initialization: %d\n" % (source, count), encoding="utf-8"
-            )
+                "Files available at initialization: %d\n" % (source, count)).encode("utf-8"))
         source_files = [str(item.relative_to(source)) for item in sorted(source.rglob("*")) if item.is_file() and ".git" not in item.parts]
         _write_json(path / "project/source.json", {"root": str(source), "files": source_files})
     status_path = path / "project/status.json"
@@ -501,7 +569,7 @@ def _init_workspace(path, official, one_liner, source_path, capabilities, stack_
     _write_json(status_path, status)
     approvals_path = path / "project/approvals.json"
     if not approvals_path.exists():
-        approvals_path.write_text("[]\n", encoding="utf-8")
+        _write_json(approvals_path, [])
     ui_path = path / "config/ui.json"
     if not ui_path.exists():
         ui = {"version": "1.0.0", "platforms": list(selected_platforms), "stackProfile": stack_profile, "tokenSource": "tokens/src", "deliveryStatus": "preview-only"}
@@ -856,7 +924,7 @@ def start_generation(path, phase):
             # A run that died may already have written that the phase is done; status is the progress authority,
             # so it goes back before any other error is reported.
             if run_error:
-                (path / "project/status.json").write_bytes(status_before)
+                _write_atomic(path / "project/status.json", status_before)
             # Approvals, the UI manifest, unit outputs and unit progress belong to other flows.
             try:
                 changed = _restore(path, PHASE_PROTECTED_ROOTS, before) + _restore_unit_progress(path, status_before)
@@ -1039,17 +1107,17 @@ def _restore(path, roots, before, excluded=None):
             if linked is not None:
                 # Only reachable if a parent link was not itself in the change set; never act through it.
                 raise RuntimeError("%s 位于链接 %s 之下，没有恢复" % (rel, linked))
-            if os.path.islink(target) or target.is_file():
-                target.unlink()
-            elif target.is_dir():
-                shutil.rmtree(target)
+            _remove(target)
             if rel not in before:
                 continue
-            target.parent.mkdir(parents=True, exist_ok=True)
             if isinstance(before[rel], tuple):
-                os.symlink(before[rel][1], target)
+                fd = _open_dir(target.parent)
+                try:
+                    os.symlink(before[rel][1], target.name, dir_fd=fd)
+                finally:
+                    os.close(fd)
             else:
-                target.write_bytes(before[rel])
+                _write_new(target, before[rel])
     except Exception as exc:
         raise RuntimeError("恢复没有完成（%s）；改动前后的版本保存在 %s" % (exc, backup))
     return reported
@@ -1074,10 +1142,10 @@ def _restore_unit_progress(path, status_bytes):
     try:
         current = json.loads(status_path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
-        status_path.write_bytes(status_bytes)
+        _write_atomic(status_path, status_bytes)
         return ["project/status.json"]
     if not isinstance(current, dict):
-        status_path.write_bytes(status_bytes)
+        _write_atomic(status_path, status_bytes)
         return ["project/status.json"]
     had_units = isinstance(before, dict) and "units" in before
     if had_units and current.get("units") == before["units"]:
@@ -1197,8 +1265,7 @@ def _review_unit(job_id, path, unit_id):
     setting = _agent_setting(path, "review")
     digest = check_workspace.unit_output_hash(path, unit)
     verdict_path = _unit_path(path, unit_id) / "review.json"
-    if verdict_path.is_symlink() or verdict_path.exists():
-        verdict_path.unlink()
+    _remove(verdict_path)
     _job_log(job_id, "正在截取预览截图…", "审查 unit %s" % unit_id)
     # Screenshots are an extra input: when Chrome fails the review still runs on the source and says so.
     try:
@@ -1208,20 +1275,22 @@ def _review_unit(job_id, path, unit_id):
         shots = []
         _job_log(job_id, "截图失败（%s），本次没有视觉截图，审查只看源码。" % exc)
     _job_log(job_id, "正在启动独立审查进程（%s，只读）…" % setting["engine"], "审查 unit %s" % unit_id)
-    cmd = _agent_command(path, setting, _review_prompt(path, unit, shots), verdict_path=verdict_path, images=shots)
-    claude_data = _run_agent_command(cmd, path, setting)
-    if claude_data is not None:
-        verdict = claude_data.get("structured_output")
-        if not isinstance(verdict, dict):
-            try:
-                verdict = json.loads(claude_data.get("result") or "")
-            except ValueError:
-                raise ValueError("审查进程没有给出可读的结论")
-        _write_json(verdict_path, verdict)
-    try:
-        verdict = json.loads(verdict_path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        raise ValueError("审查进程没有给出可读的结论")
+    # The codex CLI writes its last message itself, outside its sandbox; it gets a file outside the workspace so
+    # nothing an agent planted there can redirect it. The workbench copies the verdict in afterwards.
+    with tempfile.TemporaryDirectory(prefix="brand-system-verdict-") as scratch:
+        output = Path(scratch) / "review.json"
+        cmd = _agent_command(path, setting, _review_prompt(path, unit, shots), verdict_path=output, images=shots)
+        claude_data = _run_agent_command(cmd, path, setting)
+        try:
+            if claude_data is not None:
+                verdict = claude_data.get("structured_output")
+                if not isinstance(verdict, dict):
+                    verdict = json.loads(claude_data.get("result") or "")
+            else:
+                verdict = json.loads(output.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            raise ValueError("审查进程没有给出可读的结论")
+    _write_json(verdict_path, verdict)
     findings = verdict.get("findings") if isinstance(verdict, dict) else None
     if (
         not isinstance(verdict, dict)
@@ -1502,10 +1571,7 @@ def _unit_screenshots(path, unit):
     one screen looks fine."""
     unit_root = _unit_path(path, unit["id"])
     out_dir = unit_root / "screenshots"
-    if out_dir.is_symlink():
-        out_dir.unlink()
-    elif out_dir.exists():
-        shutil.rmtree(out_dir)
+    _remove(out_dir)
     chrome = _chrome_binary()
     if not chrome:
         return []
@@ -1516,8 +1582,7 @@ def _unit_screenshots(path, unit):
     try:
         captured = _capture_views(chrome, page.as_uri())
     finally:
-        page.unlink()
-    out_dir.mkdir()
+        _remove(page)
     shots = []
     for name, data in captured.items():
         _write_new(out_dir / name, data)
