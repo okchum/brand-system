@@ -19,6 +19,10 @@ sys.path.insert(0, str(ROOT / "scripts"))
 import check_workspace  # noqa: E402
 import workbench  # noqa: E402
 
+# Unit tests must not start a real browser; the one test that needs Chrome restores this.
+REAL_CHROME = workbench._chrome_binary
+workbench._chrome_binary = lambda: None
+
 G1_APPROVED = {
     "kind": "gate", "gate": "G1", "status": "approved", "scope": "strategy",
     "snapshot": "direction-C", "confirmation": "选 C", "approvedAt": "now", "version": "v1",
@@ -365,6 +369,43 @@ class UiWorkbenchTest(unittest.TestCase):
                 mock.patch.object(workbench.subprocess, "run", return_value=failed_check):
             job = wait_for(workbench.start_unit_job(workspace, 4, unit_id))
         return job, calls
+
+    def test_review_is_given_the_preview_screenshots(self):
+        with tempfile.TemporaryDirectory() as root:
+            workspace = self.phase_four(root)
+            shots = [workspace / workbench.unit_dir("page-map") / "screenshots/desktop-top.png"]
+            verdict = {"conclusion": "approved", "summary": "ok", "findings": []}
+            with mock.patch.object(workbench, "_unit_screenshots", return_value=shots):
+                job, calls = self.run_unit_job(workspace, "page-map", verdict=verdict)
+            self.assertEqual(job["status"], "done", job)
+            review = calls[1]
+            self.assertIn("--image=%s" % shots[0], review)
+            self.assertLess(review.index("--image=%s" % shots[0]), len(review) - 1)
+            self.assertIn("screenshots/desktop-top.png", review[-1])
+
+    def test_review_without_a_browser_says_it_had_no_screenshots(self):
+        with tempfile.TemporaryDirectory() as root:
+            workspace = self.phase_four(root)
+            verdict = {"conclusion": "approved", "summary": "ok", "findings": []}
+            job, calls = self.run_unit_job(workspace, "page-map", verdict=verdict)
+            self.assertFalse([part for part in calls[1] if part.startswith("--image")])
+            self.assertIn("没有视觉截图", "\n".join(job["logs"]))
+            self.assertIn("没有视觉截图", calls[1][-1])
+
+    @unittest.skipUnless(REAL_CHROME(), "needs Chrome or Chromium")
+    def test_screenshots_render_with_tokens_at_both_widths_and_scroll_positions(self):
+        with tempfile.TemporaryDirectory() as root:
+            workspace = self.phase_four(root)
+            write_output(workspace, "page-map", "<html><head></head><body style='height:3000px;background:var(--color-primary)'>x</body></html>")
+            unit = workbench._unit_record(json.loads((workspace / "src/ui/ir/manifest.json").read_text(encoding="utf-8")), "page-map")
+            with mock.patch.object(workbench, "_chrome_binary", REAL_CHROME):
+                shots = workbench._unit_screenshots(workspace, unit)
+            self.assertEqual(sorted(shot.name for shot in shots),
+                             ["desktop-bottom.png", "desktop-top.png", "mobile-bottom.png", "mobile-top.png"])
+            for shot in shots:
+                self.assertEqual(shot.read_bytes()[:8], b"\x89PNG\r\n\x1a\n")
+            # The token-injected copies are scaffolding and must not stay next to the output.
+            self.assertFalse(list((workspace / workbench.unit_dir("page-map")).glob(".preview-*")))
 
     def test_unit_job_generates_then_runs_independent_read_only_review(self):
         with tempfile.TemporaryDirectory() as root:

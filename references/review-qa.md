@@ -64,3 +64,5 @@
 Phase 4 及以后（含发布检查）每个 unit 都必须处于 `approved`，且有自己的、仍对应当前输出的 approved `unit-review` 记录，并绑定同一份 manifest 的版本与 SHA-256 hash，以及被审查输出内容的 `outputHash`。evidence 必须是非空数组，内容可以是测试命令、静态检查结果、差异摘要或证据文件路径。主 agent 自己派审查 subagent 时，若当前模型为 GPT，subagent 只能继承当前模型，不得调用 sonnet、opus、fable、haiku 等 Claude 模型；工作台的自动审查按 `config/ui.json` 的 `agents` 选择引擎和模型，并把它们写进 reviewer。
 
 一个 unit 自上次 approved 以来已有 `changes-requested` 审查时，下一次审查是复审：逐条核对这些审查列出的问题是否修好，未修好的、以及这次修改新引入的问题照常定级；复审才第一次看到、在上一版就已存在的问题最多记 P2。全量重查每轮都能在大页面上找出新问题，复审保证 unit 能在有限轮次内收敛；代价是首轮漏掉的既有问题不会再阻塞 unit，而是作为 P2 留在记录里。
+
+只读源码看不出整体视觉问题（例如固定高度的侧栏在页面下半段断开、元素重叠或溢出），所以工作台在每次 unit 审查前用无头 Chrome 渲染注入 token 后的输出，按桌面 1280×800 与手机 390×844 各截页面顶部和滚到底部两张，存进 unit 目录的 `screenshots/`，交给审查进程一起看；视口用真实高度，否则 `100vh` 会被撑满而把这类问题藏起来。找不到 Chrome 时照常审查，但日志写明本次没有视觉截图。
