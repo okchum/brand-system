@@ -422,15 +422,16 @@ def unit_output_hash(ws, unit):
     return "sha256:" + digest.hexdigest()
 
 
+def review_on_output(ws, review, manifest, unit):
+    """The review, whatever its verdict, was given on this manifest and on the output bytes now on disk."""
+    digest = unit_output_hash(ws, unit)
+    return digest is not None and review_matches(review, manifest) and review.get("outputHash") == digest
+
+
 def review_current(ws, review, manifest, unit):
     """An approved review still vouches for the unit: same manifest and same output bytes."""
-    digest = unit_output_hash(ws, unit)
-    return (
-        digest is not None
-        and review_matches(review, manifest)
-        and review.get("conclusion") == APPROVED
-        and review.get("outputHash") == digest
-    )
+    # review_on_output first: it also turns away a missing review.
+    return review_on_output(ws, review, manifest, unit) and review.get("conclusion") == APPROVED
 
 
 def unsatisfied_dependencies(ws, manifest, status_by_id, latest_reviews, unit):

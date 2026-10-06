@@ -459,7 +459,7 @@ class UiWorkbenchTest(unittest.TestCase):
 
     @unittest.skipUnless(REAL_CHROME(), "needs Chrome or Chromium")
     def test_bottom_screenshot_shows_the_end_of_the_page(self):
-        # Chrome's --screenshot ignored the scroll position and returned a blank frame for "bottom".
+        # The bottom shot must show the end of the page, not the top again or a blank frame.
         blue = "<div style='height:100vh;background:#0000ff'></div>"
         with tempfile.TemporaryDirectory() as root:
             workspace = self.phase_four(root)
@@ -751,7 +751,7 @@ class UiWorkbenchTest(unittest.TestCase):
             self.assertIn("Navigation misses focus state", job["prompt"])
 
     def test_review_after_changes_requested_is_a_re_review(self):
-        # A real page unit failed six full re-audits, each finding new pre-existing issues.
+        # A full re-audit of a large unit never runs out of pre-existing issues; a re-review checks what was asked.
         with tempfile.TemporaryDirectory() as root:
             workspace = self.phase_four(root)
             unit = workbench._unit_record(json.loads((workspace / "src/ui/ir/manifest.json").read_text(encoding="utf-8")), "page-map")
@@ -761,8 +761,25 @@ class UiWorkbenchTest(unittest.TestCase):
             self.assertIn("复审", prompt)
             self.assertIn("review-evidence.json", prompt)
 
+    def test_prompts_carry_review_findings_not_the_deleted_verdict_file(self):
+        with tempfile.TemporaryDirectory() as root:
+            workspace = self.phase_four(root)
+            write_output(workspace, "page-map")
+            workbench.begin_unit_generation(workspace, "page-map")
+            workbench.mark_unit_in_review(workspace, "page-map")
+            workbench.append_unit_review(
+                workspace, "page-map", "changes-requested", reviewer=REVIEWER,
+                evidence=["src/ui/units/page-map/review.json", "summary", "P1 nav：no focus style"],
+                file_scope=[{"path": workbench.unit_output_path("page-map"), "startLine": 1, "endLine": 1}],
+                output_hash=current_output_hash(workspace, "page-map"),
+            )
+            unit = workbench._unit_record(json.loads((workspace / "src/ui/ir/manifest.json").read_text(encoding="utf-8")), "page-map")
+            for prompt in (workbench._unit_feedback(workspace, "page-map"), workbench._review_prompt(workspace, unit)):
+                self.assertIn("no focus style", prompt)
+                self.assertNotIn("page-map/review.json", prompt)
+
     def test_regeneration_prompt_keeps_every_round_since_the_last_approval(self):
-        # A real layout unit fixed a finding, lost the fix two rounds later, and was asked for it again.
+        # Fixes asked for in earlier rounds must stay in front of the generator, or the next round undoes them.
         with tempfile.TemporaryDirectory() as root:
             workspace = self.phase_four(root)
             self.review(workspace, "page-map")
@@ -971,8 +988,7 @@ class UiWorkbenchRobustnessTest(unittest.TestCase):
         self.assertLess(time.time() - started, 10)
 
     def test_failed_agent_reports_what_it_said(self):
-        # A real codex run exited 1 mid-unit and the page showed only the exit code, so a usage limit
-        # could not be told apart from a crash.
+        # The exit code alone cannot tell a usage limit from a crash; the agent's own words can.
         events = [{"type": "turn.started"}, {"type": "error", "message": "You've hit your usage limit."},
                   {"type": "turn.failed", "error": {"message": "You've hit your usage limit."}}]
         script = "import json; [print(json.dumps(e)) for e in %r]; raise SystemExit(1)" % events
@@ -1289,8 +1305,31 @@ class UiWorkbenchHttpTest(unittest.TestCase):
         self.assertNotIn("bad", css)
         self.assertNotIn("<", css)
 
+    def test_token_css_drops_values_that_would_swallow_later_declarations(self):
+        self.write_tokens()
+        with tempfile.TemporaryDirectory() as outside:
+            (Path(outside) / "secret.json").write_text(json.dumps({"leak": {"value": "1px"}}), encoding="utf-8")
+            (self.workspace / "tokens/src/linked.json").symlink_to(Path(outside) / "secret.json")
+            (self.workspace / "tokens/src/odd.json").write_text(json.dumps({
+                "font": {"open": {"value": '"Manrope'}, "comment": {"value": "a /* b"}, "quoted": {"value": '"SF Pro", sans-serif'}},
+            }), encoding="utf-8")
+            css = workbench.token_css(self.workspace)
+            rule = workbench._token_rule(self.workspace)
+        self.assertIn('--font-quoted:"SF Pro", sans-serif;', css)
+        for dropped in ("--font-open", "--font-comment", "--leak"):
+            self.assertNotIn(dropped, css)
+        self.assertIn("--font-open", rule)
+        self.assertIn("tokens/src/linked.json", rule)
+
+    def test_tokens_go_into_head_not_a_header_or_before_the_doctype(self):
+        css = ":root{}"
+        self.assertEqual(workbench._with_tokens("<!doctype html><header>h</header>", css),
+                         "<!doctype html><style data-brand-tokens>:root{}</style><header>h</header>")
+        self.assertEqual(workbench._with_tokens("<html><head lang='x'><header>", css),
+                         "<html><head lang='x'><style data-brand-tokens>:root{}</style><header>")
+
     def test_unit_prompts_list_the_injected_variable_names(self):
-        # A real generator guessed --font-family-body for fontFamily.body; it must not have to guess.
+        # Variable names keep the JSON keys' case, which a generator would otherwise guess wrong.
         self.write_tokens()
         unit = {"id": "page-map", "kind": "page-map", "files": ["src/ui/units/page-map/output.html"]}
         for prompt in (workbench._unit_prompt(self.workspace, unit, "A"), workbench._review_prompt(self.workspace, unit)):
@@ -1339,6 +1378,14 @@ class UiWorkbenchHttpTest(unittest.TestCase):
         self.assertEqual((status["phase"], status["state"]), (1, "draft"))
         self.call("/api/approve", {"path": str(self.workspace), "gate": "G1", "choice": "A"})
         self.assertEqual(workbench._missing_gates(self.workspace, 3), ["G2"])
+
+    def test_withdrawing_g3_from_phase_four_returns_to_phase_three(self):
+        self.set_phase(4)
+        (self.workspace / "project/approvals.json").write_text(json.dumps([gate("G1"), gate("G2"), gate("G3")]), encoding="utf-8")
+        code, payload = self.call("/api/approve", {"path": str(self.workspace), "gate": "G3", "status": "changes-requested"})
+        self.assertEqual((code, payload["withdrawn"]), (200, ["G3"]))
+        status = json.loads((self.workspace / "project/status.json").read_text(encoding="utf-8"))
+        self.assertEqual((status["phase"], status["state"]), (3, "draft"))
 
     def test_unexpected_errors_are_500_without_internals(self):
         with mock.patch.object(workbench, "unit_overview", side_effect=RuntimeError("secret /internal/path")), \

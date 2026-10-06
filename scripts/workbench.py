@@ -39,7 +39,7 @@ TEMPLATE = ROOT / "assets" / "brief.template.json"
 HTML = (ROOT / "assets" / "workbench.html").read_text(encoding="utf-8")
 DEFAULT_WORKSPACE_DIR = "brand-workspace"
 # One agent run (a phase, a unit generation or a review) is stopped after this many seconds.
-# A real codex Phase 1 run took about 9.5 minutes and later phases write more, so 10 minutes cut them off.
+# Long enough for a real agent to write a whole phase, which takes it around ten minutes.
 AGENT_TIMEOUT = 1800
 
 
@@ -408,8 +408,7 @@ def unit_overview(path):
                 "summary": review.get("summary") or "",
                 "evidence": review.get("evidence", []),
                 # Whether the verdict, whatever it is, was given on the output now on disk.
-                "current": check_workspace.review_matches(review, manifest)
-                and review.get("outputHash") == check_workspace.unit_output_hash(path, unit),
+                "current": check_workspace.review_on_output(path, review, manifest, unit),
             },
             "canGenerate": not phase_blocker and not blocked_by and not busy,
             "canReview": not phase_blocker and state == IN_REVIEW and not busy,
@@ -884,22 +883,34 @@ def start_generation(path, phase):
     return job_id
 
 
+# Rounds of review findings carried into the next generation and re-review; older ones are dropped to keep
+# the prompt bounded.
+REVIEW_ROUNDS_CARRIED = 4
+
+
 def _reviews_since_approval(path, unit_id):
-    """The unit's reviews after its latest approved one, oldest first."""
+    """The unit's last REVIEW_ROUNDS_CARRIED reviews after its latest approved one, oldest first."""
     since = []
     for record in _read_json(path / "project/approvals.json", []):
-        if isinstance(record, dict) and record.get("kind") == "unit-review" and record.get("unitId") == unit_id:
+        if (isinstance(record, dict) and record.get("kind") == "unit-review"
+                and check_workspace.present(record, "unitId") and record["unitId"] == unit_id):
             since = [] if record.get("conclusion") == APPROVED else since + [record]
-    return since
+    return since[-REVIEW_ROUNDS_CARRIED:]
+
+
+def _review_findings(review, unit_id):
+    """A review's evidence without the verdict file, which is deleted before the next review."""
+    verdict = "%s/review.json" % unit_dir(unit_id)
+    return [item for item in review.get("evidence", []) if item != verdict]
 
 
 def _unit_feedback(path, unit_id):
     """What the reviews since the unit's last approval and its status note asked for, so a regeneration can act on it."""
     lines = []
-    # Only the latest round used to be passed on, and fixes from earlier rounds came undone.
-    for number, review in enumerate(reversed(_reviews_since_approval(path, unit_id)[-4:])):
+    # Every round since the last approval, so a fix from an earlier round is not undone by the next one.
+    for number, review in enumerate(reversed(_reviews_since_approval(path, unit_id))):
         lines.append(("最近一次审查（针对上一版输出）要求修改，逐条处理后重写，仍存在的问题都要解决：" if number == 0
-                      else "更早一轮审查的要求，修好的不要改回去：") + "；".join(review.get("evidence", [])))
+                      else "更早一轮审查的要求，修好的不要改回去：") + "；".join(_review_findings(review, unit_id)))
     units = _read_json(path / "project/status.json").get("units", [])
     note = next((item.get("note") for item in units if isinstance(item, dict) and item.get("unitId") == unit_id), "")
     if note:
@@ -908,9 +919,13 @@ def _unit_feedback(path, unit_id):
 
 
 def _token_rule(path):
-    names = re.findall(r"(--[A-Za-z0-9_-]+):", token_css(path))
-    return ("工作台预览时会把 tokens/src 展开成 CSS 变量注入页面 <head>：变量名是 JSON 路径用 - 连接，保留键名大小写，"
+    declarations, skipped = _token_declarations(path)
+    names = [item.split(":", 1)[0] for item in declarations]
+    rule = ("工作台预览时会把 tokens/src 展开成 CSS 变量注入页面 <head>：变量名是 JSON 路径用 - 连接，保留键名大小写，"
             "值里的 {a.b} 引用变成 var(--a-b)。实际注入的变量（区分大小写）：" + ("、".join(names) or "无") + "。")
+    if skipped:
+        rule += "以下 token 或文件因取值不安全、无法读取或是链接而没有注入，页面不要引用它们：" + "、".join(skipped) + "。"
+    return rule
 
 
 def _unit_prompt(path, unit, choice):
@@ -923,16 +938,19 @@ def _unit_prompt(path, unit, choice):
 def _visual_rule(path, shots):
     if not shots:
         return "本次没有视觉截图，只能从源码判断视觉。"
-    return ("附带的截图（" + "、".join(str(shot.relative_to(path)) for shot in shots) + "）是工作台预览在桌面 1280×800 与手机 390×844 下页面顶部和滚到底部的实际渲染。"
+    sizes = "、".join("%s %d×%d" % view for view in SCREENSHOT_VIEWS)
+    return ("截图文件（" + "、".join(str(shot.relative_to(path)) for shot in shots) + "，可直接打开查看）是工作台预览在 "
+            + sizes + " 下页面顶部和滚到底部的实际渲染。"
             "对照截图检查整体视觉：区块在页面下半段断开或留白、元素重叠或溢出、文字被截断、对齐与留白、层级是否清楚；按实际影响定级。")
 
 
 def _re_review_rule(path, unit_id):
-    # Full re-audits found new pre-existing issues on every round of a large page and never converged.
-    since = _reviews_since_approval(path, unit_id)[-4:]
+    # A full re-audit of a large unit finds a few new pre-existing issues every round and never ends; a re-review
+    # checks what was asked and what the change itself broke.
+    since = _reviews_since_approval(path, unit_id)
     if not since:
         return ""
-    return ("这是复审：逐条核对之前审查要求修改的问题是否修好——" + "；".join(e for r in since for e in r.get("evidence", []))
+    return ("这是复审：逐条核对之前审查要求修改的问题是否修好——" + "；".join(e for r in since for e in _review_findings(r, unit_id))
             + "。未修好的问题和这次修改新引入的问题照常定级；上一版就已存在、这次才第一次发现的问题最多记 P2。")
 
 
@@ -1327,9 +1345,12 @@ TOKEN_NAME = re.compile(r"[A-Za-z0-9_-]+$")
 TOKEN_ALIAS = re.compile(r"\{([A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]+)*)\}")
 
 
-def token_css(path):
-    """tokens/src flattened to CSS custom properties: a leaf is an object with $value or value, named by its JSON path."""
-    declarations = []
+def _token_declarations(path):
+    """tokens/src flattened to CSS custom properties, plus what was left out and why it was.
+
+    A leaf is an object with $value or value, named by its JSON path."""
+    root = path / "tokens/src"
+    declarations, skipped = [], []
 
     def walk(node, names):
         for key, child in node.items():
@@ -1337,26 +1358,40 @@ def token_css(path):
                 continue
             value = child.get("$value", child.get("value"))
             if isinstance(value, (str, int, float)) and not isinstance(value, bool):
+                name = "--" + "-".join(names + [key])
                 value = TOKEN_ALIAS.sub(lambda m: "var(--%s)" % m.group(1).replace(".", "-"), str(value))
-                # Dropped rather than escaped: such a value could close the rule or the style element.
-                if not re.search(r"[;{}<>\\]", value):
-                    declarations.append("--%s:%s;" % ("-".join(names + [key]), value))
+                # Dropped rather than escaped: such a value could close the rule or the style element, and an open
+                # string or comment would swallow every declaration after it.
+                if re.search(r"[;{}<>\\\n]|/\*|\*/", value) or value.count('"') % 2 or value.count("'") % 2:
+                    skipped.append(name)
+                else:
+                    declarations.append("%s:%s;" % (name, value))
             else:
                 walk(child, names + [key])
 
-    for item in sorted((path / "tokens/src").rglob("*.json")):
+    for item in sorted(root.rglob("*.json")):
+        # A linked file could feed values from outside the workspace into pages that run scripts.
+        if item.is_symlink() or not item.resolve().is_relative_to(root.resolve()):
+            skipped.append(str(item.relative_to(path)))
+            continue
         try:
             data = json.loads(item.read_text(encoding="utf-8"))
         except (OSError, ValueError):
+            skipped.append(str(item.relative_to(path)))
             continue
         if isinstance(data, dict):
             walk(data, [])
-    return ":root{" + "".join(declarations) + "}"
+    return declarations, skipped
+
+
+def token_css(path):
+    return ":root{" + "".join(_token_declarations(path)[0]) + "}"
 
 
 def _with_tokens(html, css):
     tag = "<style data-brand-tokens>%s</style>" % css
-    match = re.search(r"<head[^>]*>", html, re.IGNORECASE)
+    # Inside <head> when there is one; never before the doctype, which would put the page in quirks mode.
+    match = re.search(r"<head(?:\s[^>]*)?>", html, re.IGNORECASE) or re.search(r"<!doctype[^>]*>", html, re.IGNORECASE)
     return html[:match.end()] + tag + html[match.end():] if match else tag + html
 
 
@@ -1381,12 +1416,18 @@ class _ChromePipe:
         # Chrome needs exactly fds 3 and 4; a shell maps them because preexec_fn is unsafe in this threaded server.
         args = [chrome, "--headless=new", "--disable-gpu", "--hide-scrollbars", "--no-first-run",
                 "--no-default-browser-check", "--remote-debugging-pipe", "--user-data-dir=" + profile, "about:blank"]
-        self.proc = subprocess.Popen(
-            ["/bin/sh", "-c", 'exec "$@" 3<&%d 4>&%d' % (to_chrome, from_chrome), "chrome"] + args,
-            pass_fds=(to_chrome, from_chrome), stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL, start_new_session=True)
-        os.close(to_chrome)
-        os.close(from_chrome)
+        try:
+            self.proc = subprocess.Popen(
+                ["/bin/sh", "-c", 'exec "$@" 3<&%d 4>&%d' % (to_chrome, from_chrome), "chrome"] + args,
+                pass_fds=(to_chrome, from_chrome), stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL, start_new_session=True)
+        except BaseException:
+            for fd in (self._write, self._read):
+                os.close(fd)
+            raise
+        finally:
+            os.close(to_chrome)
+            os.close(from_chrome)
         self._buffer, self._next, self._events, self.deadline, self.session = b"", 0, [], deadline, None
 
     def _message(self):
