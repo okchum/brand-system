@@ -127,17 +127,24 @@ _DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
 # $TMPDIR and /tmp, so none of those can hold files an agent must not swap; the user's cache directory is outside it.
 def _default_scratch_root():
     # XDG_CACHE_HOME is honoured only when it is an absolute path outside the temp directories the sandbox can write.
-    cache = os.environ.get("XDG_CACHE_HOME") or ""
+    # The home fallback gets the same check: HOME itself can point into a temporary directory. None means there is
+    # no safe place, and _scratch_dir refuses.
     shared = [Path(tempfile.gettempdir()).resolve(), Path("/tmp").resolve()]
-    if not os.path.isabs(cache) or any(Path(cache).resolve().is_relative_to(root) for root in shared):
-        cache = str(Path.home() / ".cache")
-    return Path(cache) / "brand-system"
+
+    def safe(directory):
+        return os.path.isabs(directory) and not any(Path(directory).resolve().is_relative_to(root) for root in shared)
+    for cache in (os.environ.get("XDG_CACHE_HOME") or "", str(Path.home() / ".cache")):
+        if safe(cache):
+            return Path(cache) / "brand-system"
+    return None
 
 
 SCRATCH_ROOT = _default_scratch_root()
 
 
 def _scratch_dir(prefix):
+    if SCRATCH_ROOT is None:
+        raise ValueError("缓存目录位于 agent 沙箱可写的临时目录里，工作台没有安全的地方存放临时文件")
     SCRATCH_ROOT.mkdir(parents=True, exist_ok=True, mode=0o700)
     if SCRATCH_ROOT.is_symlink() or not SCRATCH_ROOT.is_dir():
         raise ValueError("%s 不是真实目录，拒绝在这里存放工作台的临时文件" % SCRATCH_ROOT)
@@ -194,34 +201,30 @@ def _remove_entry(dir_fd, name):
     if not stat.S_ISDIR(mode):
         os.unlink(name, dir_fd=dir_fd)
         return
-    # Depth first without recursion and with one handle besides dir_fd, so a tree an agent nests thousands of levels
-    # deep neither exhausts the stack nor the process's file handles. ".." is never a link; a directory the agent
-    # moves meanwhile can only move within the workspace it can write.
-    fd, below = os.open(name, _DIR_FLAGS, dir_fd=dir_fd), []
+    # Recursive, holding a handle on every level: a directory an agent moves away mid-walk takes only its own
+    # subtree with it, never another directory's files. A tree too deep for that is refused part way, and callers
+    # carry on with whatever else they have to restore.
+    child = os.open(name, _DIR_FLAGS, dir_fd=dir_fd)
     try:
-        while True:
-            subdir = None
-            with os.scandir(fd) as entries:
-                for entry in entries:
-                    if entry.is_dir(follow_symlinks=False):
-                        subdir = subdir or entry.name
-                    else:
-                        os.unlink(entry.name, dir_fd=fd)
-            if subdir is not None:
-                child = os.open(subdir, _DIR_FLAGS, dir_fd=fd)
-                os.close(fd)
-                fd = child
-                below.append(subdir)
-            elif below:
-                parent = os.open("..", _DIR_FLAGS, dir_fd=fd)
-                os.close(fd)
-                fd = parent
-                os.rmdir(below.pop(), dir_fd=fd)
-            else:
-                break
+        with os.scandir(child) as entries:
+            names = [entry.name for entry in entries]
+        for entry in names:
+            _remove_entry(child, entry)
     finally:
-        os.close(fd)
+        os.close(child)
     os.rmdir(name, dir_fd=dir_fd)
+
+
+def _clear(dir_fd, name, target):
+    """_remove_entry, with a tree too deep to walk reported as such instead of as a raw RecursionError or EMFILE."""
+    try:
+        _remove_entry(dir_fd, name)
+    except RecursionError as exc:
+        raise ValueError("%s 的目录层级过深，只删除了一部分" % target) from exc
+    except OSError as exc:
+        if exc.errno == errno.EMFILE:
+            raise ValueError("%s 的目录层级过深，只删除了一部分" % target) from exc
+        raise
 
 
 def _remove(target):
@@ -231,7 +234,7 @@ def _remove(target):
     except FileNotFoundError:
         return
     try:
-        _remove_entry(fd, target.name)
+        _clear(fd, target.name, target)
     finally:
         os.close(fd)
 
@@ -240,7 +243,7 @@ def _write_new(target, data):
     """Create target afresh inside its real directory; whatever sits at that name, a planted link included, is removed."""
     fd = _open_dir(target.parent)
     try:
-        _remove_entry(fd, target.name)
+        _clear(fd, target.name, target)
         out = os.open(target.name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o644, dir_fd=fd)
         with os.fdopen(out, "wb") as handle:
             handle.write(data)
@@ -257,7 +260,7 @@ def _write_atomic(target, data):
     temporary = target.name + ".tmp"
     fd = _open_dir(target.parent)
     try:
-        _remove_entry(fd, temporary)
+        _clear(fd, temporary, target.with_name(temporary))
         out = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o644, dir_fd=fd)
         with os.fdopen(out, "wb") as handle:
             handle.write(data)
@@ -1163,15 +1166,13 @@ def _restore(path, roots, before, excluded=None):
     try:
         backup = Path(_scratch_dir("restore-"))
     except (OSError, ValueError) as exc:
-        backup, unsaved = None, exc  # restoring the protected files matters more than keeping a copy
+        # Without a copy, overwriting could lose an edit the user made meanwhile; nothing is touched.
+        raise RuntimeError("没能准备备份目录（%s），没有恢复：%s" % (exc, "、".join(changed)))
     reported = []
     # Copy everything out before touching anything: removing a replaced directory below also removes its files.
     for rel in changed:
         if rel not in after:
             reported.append(rel)
-            continue
-        if backup is None:
-            reported.append("%s（改动后的版本没能保存：%s）" % (rel, unsaved))
             continue
         link = isinstance(after[rel], tuple)
         kept = backup / ("links" if link else "files") / rel
@@ -1197,7 +1198,7 @@ def _restore(path, roots, before, excluded=None):
             else:
                 _write_new(target, before[rel])
     except Exception as exc:
-        raise RuntimeError("恢复没有完成（%s）；改动后的版本%s" % (exc, "保存在 %s" % backup if backup else "没能保存"))
+        raise RuntimeError("恢复没有完成（%s）；改动前后的版本保存在 %s" % (exc, backup))
     return reported
 
 
@@ -1595,7 +1596,7 @@ def _head_insert_at(html):
             after_doctype = end + 1
         elif tag in RAW_TEXT_ELEMENTS:
             # The closing tag must end there: "</scripts" inside a script is still script text.
-            close = re.compile(r"</%s[\s/>]" % tag).search(lower, end)
+            close = re.compile(r"</%s[ \t\n\f\r/>]" % tag).search(lower, end)  # HTML whitespace only
             if close is None:
                 return after_doctype
             end = close.start()

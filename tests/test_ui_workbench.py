@@ -479,6 +479,8 @@ class UiWorkbenchTest(unittest.TestCase):
         for value in ("", "relative/cache", "/tmp/cache", tempfile.gettempdir()):
             with mock.patch.dict(os.environ, {"XDG_CACHE_HOME": value}):
                 self.assertEqual(workbench._default_scratch_root(), home_cache, value)
+        with mock.patch.dict(os.environ, {"XDG_CACHE_HOME": "", "HOME": "/tmp/fake-home"}):
+            self.assertIsNone(workbench._default_scratch_root())
         with tempfile.TemporaryDirectory() as root, tempfile.TemporaryDirectory() as outside:
             linked = Path(root).resolve() / "scratch"
             linked.symlink_to(outside)
@@ -502,7 +504,7 @@ class UiWorkbenchTest(unittest.TestCase):
             def plant_then_fail(cmd, cwd, timeout):
                 # Built one level at a time, as an agent would; the full path is too long for one mkdir.
                 fd = os.open(Path(cwd) / "project", os.O_RDONLY)
-                for name in ["status.json.tmp"] + ["d"] * 1100:
+                for name in ["status.json.tmp"] + ["d"] * 300:
                     os.mkdir(name, dir_fd=fd)
                     child = os.open(name, os.O_RDONLY, dir_fd=fd)
                     os.close(fd)
@@ -510,16 +512,54 @@ class UiWorkbenchTest(unittest.TestCase):
                 os.close(fd)
                 (Path(cwd) / "project/approvals.json").write_text("[]", encoding="utf-8")
                 raise TimeoutError("codex 进程超过 30 分钟未完成")
-            with mock.patch.object(workbench, "_run_agent", side_effect=plant_then_fail):
-                job_id = workbench.start_generation(workspace, 4)
-                deadline = time.time() + 120  # removing a thousand levels takes seconds, not the helper's five
-                while workbench.JOBS[job_id]["status"] == "running" and time.time() < deadline:
-                    time.sleep(0.1)
-            job = workbench.JOBS[job_id]
+            # A low recursion limit makes 300 levels "too deep" for the workbench while the temporary directory's own
+            # cleanup, at the normal limit, can still remove them.
+            limit = sys.getrecursionlimit()
+            sys.setrecursionlimit(200)
+            try:
+                with mock.patch.object(workbench, "_run_agent", side_effect=plant_then_fail):
+                    job = wait_for(workbench.start_generation(workspace, 4))
+            finally:
+                sys.setrecursionlimit(limit)
             self.assertEqual(job["status"], "error")
             self.assertIn("超过 30 分钟", job["error"])
-            self.assertFalse((workspace / "project/status.json.tmp").exists())
+            self.assertIn("层级过深", job["error"])
             self.assertEqual((workspace / "project/approvals.json").read_text(encoding="utf-8"), approvals)
+
+    def test_a_directory_moved_during_removal_never_costs_another_directory_its_files(self):
+        with tempfile.TemporaryDirectory() as root:
+            root = Path(root).resolve()
+            (root / "trash/a/b/c").mkdir(parents=True)
+            (root / "trash/a/b/c/junk").write_text("x", encoding="utf-8")
+            (root / "victim").mkdir()
+            (root / "victim/precious").write_text("keep", encoding="utf-8")
+            real_open = os.open
+
+            def move_after_opening_b(name, flags, *args, **kwargs):
+                fd = real_open(name, flags, *args, **kwargs)
+                if name == "b" and (root / "trash/a/b").exists():
+                    os.rename(root / "trash/a/b", root / "victim/b")
+                return fd
+            with mock.patch.object(workbench.os, "open", side_effect=move_after_opening_b):
+                try:
+                    workbench._remove(root / "trash")
+                except OSError:
+                    pass  # the moved directory may make the removal fail; it must not reach other files
+            self.assertEqual((root / "victim/precious").read_text(encoding="utf-8"), "keep")
+
+    def test_restore_without_a_place_for_backups_changes_nothing(self):
+        # Without a copy, overwriting would lose an edit the user made to a protected file meanwhile.
+        with tempfile.TemporaryDirectory() as root:
+            workspace = Path(root).resolve()
+            (workspace / "project").mkdir()
+            (workspace / "project/approvals.json").write_text("[]", encoding="utf-8")
+            before = workbench._snapshot(workspace, ("project/approvals.json",))
+            (workspace / "project/approvals.json").write_text("[edited]", encoding="utf-8")
+            with mock.patch.object(workbench, "_scratch_dir", side_effect=PermissionError("read-only cache")):
+                with self.assertRaises(RuntimeError) as caught:
+                    workbench._restore(workspace, ("project/approvals.json",), before)
+            self.assertIn("read-only cache", str(caught.exception))
+            self.assertEqual((workspace / "project/approvals.json").read_text(encoding="utf-8"), "[edited]")
 
     def test_codex_writes_its_verdict_outside_the_workspace(self):
         with tempfile.TemporaryDirectory() as root:
@@ -1450,6 +1490,9 @@ class UiWorkbenchHttpTest(unittest.TestCase):
     def test_token_insertion_offsets_survive_case_and_close_tag_lookalikes(self):
         css = ":root{}"
         self.assertEqual(workbench._with_tokens("İİİ<head><title>t</title>", css), "İİİ<head><style data-brand-tokens>:root{}</style><title>t</title>")
+        for lookalike in ("</scripts>", "</script\u00a0>", "</script\x0b>"):
+            html = "<script>var s='%s'; var t='<head>';</script><head>" % lookalike
+            self.assertTrue(workbench._with_tokens(html, css).endswith("<head><style data-brand-tokens>:root{}</style>"), lookalike)
         html = "<script>var s='</scripts>'; var t='<head>';</script><head>"
         self.assertTrue(workbench._with_tokens(html, css).endswith("<head><style data-brand-tokens>:root{}</style>"))
 
