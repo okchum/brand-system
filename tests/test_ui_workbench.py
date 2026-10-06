@@ -231,7 +231,7 @@ class UiWorkbenchTest(unittest.TestCase):
     def test_phase_one_generation_does_not_require_g1(self):
         with tempfile.TemporaryDirectory() as root:
             workspace = self.at_phase(self.init(root), 1)
-            with mock.patch.object(workbench, "_run_agent", return_value=1):
+            with mock.patch.object(workbench, "_run_agent", side_effect=RuntimeError("codex 退出码 1")):
                 job_id = workbench.start_generation(workspace, 1)
                 wait_for(job_id)
             self.assertNotIn("Direction B", workbench.JOBS[job_id]["prompt"])
@@ -242,7 +242,7 @@ class UiWorkbenchTest(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "G1"):
                 workbench.start_generation(workspace, 2)
             (workspace / "project/approvals.json").write_text(json.dumps([G1_APPROVED]), encoding="utf-8")
-            with mock.patch.object(workbench, "_run_agent", return_value=1):
+            with mock.patch.object(workbench, "_run_agent", side_effect=RuntimeError("codex 退出码 1")):
                 job_id = workbench.start_generation(workspace, 2)
                 wait_for(job_id)
             self.assertIn("Direction C", workbench.JOBS[job_id]["prompt"])
@@ -370,6 +370,56 @@ class UiWorkbenchTest(unittest.TestCase):
             job = wait_for(workbench.start_unit_job(workspace, 4, unit_id))
         return job, calls
 
+    def test_workbench_writes_in_a_unit_never_follow_links_the_agent_planted(self):
+        # The generating agent can write anything in its unit directory, including links to files outside it.
+        with tempfile.TemporaryDirectory() as root, tempfile.TemporaryDirectory() as outside:
+            workspace = self.phase_four(root)
+            victim = Path(outside) / "victim.txt"
+            victim.write_text("keep", encoding="utf-8")
+            unit_path = workspace / workbench.unit_dir("page-map")
+            write_output(workspace, "page-map")
+            workbench.begin_unit_generation(workspace, "page-map")
+            for name in ("metadata.json.tmp", ".preview.html", "review.json"):
+                (unit_path / name).symlink_to(victim)
+            workbench.mark_unit_in_review(workspace, "page-map")
+            self.assertFalse((unit_path / "metadata.json").is_symlink())
+            unit = workbench._unit_record(json.loads((workspace / "src/ui/ir/manifest.json").read_text(encoding="utf-8")), "page-map")
+            with mock.patch.object(workbench, "_chrome_binary", return_value="chrome"), \
+                    mock.patch.object(workbench, "_capture_views", return_value={"desktop-top.png": b"png"}):
+                workbench._unit_screenshots(workspace, unit)
+            verdict = {"conclusion": "approved", "summary": "ok", "findings": []}
+            run, _ = self.fake_codex(verdict=verdict)
+            with mock.patch.object(workbench, "_run_agent", side_effect=run), \
+                    mock.patch.object(workbench.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, "", "")):
+                wait_for(workbench.start_review_job(workspace, 4, "page-map"))
+            self.assertEqual(victim.read_text(encoding="utf-8"), "keep")
+
+    def test_unit_directory_turned_into_a_link_is_refused(self):
+        with tempfile.TemporaryDirectory() as root, tempfile.TemporaryDirectory() as outside:
+            workspace = self.phase_four(root)
+            write_output(workspace, "page-map")
+            unit_path = workspace / workbench.unit_dir("page-map")
+            shutil.copytree(unit_path, Path(outside) / "unit")
+            shutil.rmtree(unit_path)
+            unit_path.symlink_to(Path(outside) / "unit")
+            unit = workbench._unit_record(json.loads((workspace / "src/ui/ir/manifest.json").read_text(encoding="utf-8")), "page-map")
+            with mock.patch.object(workbench, "_chrome_binary", return_value="chrome"), \
+                    mock.patch.object(workbench, "_capture_views", return_value={"desktop-top.png": b"png"}):
+                with self.assertRaises(ValueError):
+                    workbench._unit_screenshots(workspace, unit)
+            self.assertFalse((Path(outside) / "unit/screenshots").exists())
+
+    def test_a_failed_screenshot_falls_back_to_a_source_only_review(self):
+        with tempfile.TemporaryDirectory() as root:
+            workspace = self.phase_four(root)
+            verdict = {"conclusion": "approved", "summary": "ok", "findings": []}
+            with mock.patch.object(workbench, "_unit_screenshots", side_effect=TimeoutError("Chrome 截图超时")):
+                job, calls = self.run_unit_job(workspace, "page-map", verdict=verdict)
+            self.assertEqual(job["status"], "done", job)
+            self.assertFalse([part for part in calls[1] if part.startswith("--image")])
+            self.assertIn("Chrome 截图超时", "\n".join(job["logs"]))
+            self.assertIn("没有视觉截图", calls[1][-1])
+
     def test_review_is_given_the_preview_screenshots(self):
         with tempfile.TemporaryDirectory() as root:
             workspace = self.phase_four(root)
@@ -405,7 +455,7 @@ class UiWorkbenchTest(unittest.TestCase):
             for shot in shots:
                 self.assertEqual(shot.read_bytes()[:8], b"\x89PNG\r\n\x1a\n")
             # The token-injected copies are scaffolding and must not stay next to the output.
-            self.assertFalse(list((workspace / workbench.unit_dir("page-map")).glob(".preview-*")))
+            self.assertFalse(list((workspace / workbench.unit_dir("page-map")).glob(".preview*")))
 
     @unittest.skipUnless(REAL_CHROME(), "needs Chrome or Chromium")
     def test_bottom_screenshot_shows_the_end_of_the_page(self):
@@ -622,7 +672,7 @@ class UiWorkbenchTest(unittest.TestCase):
                 if note:
                     raise OSError("disk full")
                 return real_set(path, unit_id, status, note)
-            with mock.patch.object(workbench, "_run_agent", return_value=1), \
+            with mock.patch.object(workbench, "_run_agent", side_effect=RuntimeError("codex 退出码 1")), \
                     mock.patch.object(workbench, "set_unit_status", side_effect=failing_note):
                 job = wait_for(workbench.start_unit_job(workspace, 4, "page-map"))
             self.assertEqual(job["status"], "error")
@@ -695,7 +745,7 @@ class UiWorkbenchTest(unittest.TestCase):
                 file_scope=[{"path": workbench.unit_output_path("page-map"), "startLine": 1, "endLine": 1}],
                 output_hash=current_output_hash(workspace, "page-map"),
             )
-            with mock.patch.object(workbench, "_run_agent", return_value=1):
+            with mock.patch.object(workbench, "_run_agent", side_effect=RuntimeError("codex 退出码 1")):
                 job = wait_for(workbench.start_unit_job(workspace, 4, "page-map"))
             self.assertIn("no focus-visible style", job["prompt"])
             self.assertIn("Navigation misses focus state", job["prompt"])
@@ -771,6 +821,8 @@ class UiWorkbenchTest(unittest.TestCase):
                 status = json.loads(status_path.read_text(encoding="utf-8"))
                 status.update(state="in-review", completed=["phase 4 assets"])
                 status_path.write_text(json.dumps(status), encoding="utf-8")
+                # Touching a protected file as well must not skip the status restore.
+                (Path(cwd) / "project/approvals.json").write_text("[]", encoding="utf-8")
                 raise TimeoutError("codex 进程超过 30 分钟未完成")
             with mock.patch.object(workbench, "_run_agent", side_effect=claim_then_timeout):
                 job = wait_for(workbench.start_generation(workspace, 4))

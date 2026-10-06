@@ -118,12 +118,31 @@ def _read_json(path, default=None):
         raise
 
 
+def _write_new(target, data):
+    """Create target afresh. Whatever sits at that name, including a link an agent planted, is removed, never written through."""
+    if target.is_symlink() or target.exists():
+        target.unlink()
+    fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o644)
+    with os.fdopen(fd, "wb") as handle:
+        handle.write(data)
+
+
 def _write_json(path, payload):
     # Write then rename, so a concurrent /api/state poll never reads half a file.
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(path.name + ".tmp")
-    temporary.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    _write_new(temporary, (json.dumps(payload, ensure_ascii=False, indent=2) + "\n").encode("utf-8"))
     os.replace(temporary, path)
+
+
+def _unit_path(path, unit_id):
+    """The unit's directory for the workbench to write in. The agent can replace it, or a parent, with a link
+    out of the workspace, and the workbench itself is not sandboxed, so such a directory is refused."""
+    target = path / unit_dir(unit_id)
+    links = [item for item in (target, *target.parents) if item != path and item.is_relative_to(path) and item.is_symlink()]
+    if links or not target.resolve().is_relative_to(path.resolve()):
+        raise ValueError("unit %s 的目录被换成了链接，拒绝写入" % unit_id)
+    return target
 
 
 def _validate_ui_selection(stack_profile, platforms):
@@ -280,7 +299,7 @@ def mark_unit_in_review(path, unit_id, generated_by=None):
         }
         if generated_by:
             metadata["generatedBy"] = generated_by
-        _write_json(path / unit_dir(unit_id) / "metadata.json", metadata)
+        _write_json(_unit_path(path, unit_id) / "metadata.json", metadata)
         return metadata
 
 
@@ -830,11 +849,15 @@ def start_generation(path, phase):
                 if item.is_file():
                     _job_log(job_id, "关键输入：" + str(item.relative_to(path)))
             _job_log(job_id, "正在生成 Phase %d 交付物…" % phase, "生成 Phase %d" % phase)
-            run_error, code = None, None
+            run_error = None
             try:
-                code = _run_agent(cmd, path, AGENT_TIMEOUT)
+                _run_agent(cmd, path, AGENT_TIMEOUT)
             except Exception as exc:
                 run_error = exc
+            # A run that died may already have written that the phase is done; status is the progress authority,
+            # so it goes back before any other error is reported.
+            if run_error:
+                (path / "project/status.json").write_bytes(status_before)
             # Approvals, the UI manifest, unit outputs and unit progress belong to other flows.
             try:
                 changed = _restore(path, PHASE_PROTECTED_ROOTS, before) + _restore_unit_progress(path, status_before)
@@ -848,10 +871,8 @@ def start_generation(path, phase):
                     ("%s；" % run_error if run_error else "")
                     + "生成进程改动了审批、UI 清单或 unit 的内容，已恢复原样：" + "、".join(changed)
                 )
-            if run_error or code != 0:
-                # A run that died may already have written that the phase is done; status is the progress authority.
-                (path / "project/status.json").write_bytes(status_before)
-                raise run_error or RuntimeError("生成进程退出码 %d" % code)
+            if run_error:
+                raise run_error
             for item in sorted(item for item in path.rglob("*") if item.is_file() and ".git" not in item.parts):
                 if item not in workspace_files:
                     _job_log(job_id, "已生成：" + str(item.relative_to(path)))
@@ -901,7 +922,7 @@ def _unit_prompt(path, unit, choice):
 
 def _visual_rule(path, shots):
     if not shots:
-        return "本次没有视觉截图（找不到 Chrome），只能从源码判断视觉。"
+        return "本次没有视觉截图，只能从源码判断视觉。"
     return ("附带的截图（" + "、".join(str(shot.relative_to(path)) for shot in shots) + "）是工作台预览在桌面 1280×800 与手机 390×844 下页面顶部和滚到底部的实际渲染。"
             "对照截图检查整体视觉：区块在页面下半段断开或留白、元素重叠或溢出、文字被截断、对齐与留白、层级是否清楚；按实际影响定级。")
 
@@ -1125,14 +1146,15 @@ def _agent_command(path, setting, prompt, unit_id=None, verdict_path=None, image
 
 
 def _run_agent_command(cmd, path, setting):
-    """Run cmd; for Claude Code also return its parsed result, which decides success."""
+    """Run cmd; for Claude Code return its parsed result, which decides success (None for codex)."""
     if setting["engine"] != "claude":
-        return _run_agent(cmd, path, AGENT_TIMEOUT), None
+        _run_agent(cmd, path, AGENT_TIMEOUT)
+        return None
     handle, output_path = tempfile.mkstemp(prefix="brand-system-claude-", suffix=".json")
     os.close(handle)
     try:
-        code = _run_agent(cmd, path, AGENT_TIMEOUT, output_path=output_path)
-        return code, _claude_result(output_path) if code == 0 else None
+        _run_agent(cmd, path, AGENT_TIMEOUT, output_path=output_path)
+        return _claude_result(output_path)
     finally:
         os.unlink(output_path)
 
@@ -1156,17 +1178,20 @@ def _review_unit(job_id, path, unit_id):
     unit = _unit_record(_read_json(path / "src/ui/ir/manifest.json"), unit_id)
     setting = _agent_setting(path, "review")
     digest = check_workspace.unit_output_hash(path, unit)
-    verdict_path = path / unit_dir(unit_id) / "review.json"
-    if verdict_path.exists():
+    verdict_path = _unit_path(path, unit_id) / "review.json"
+    if verdict_path.is_symlink() or verdict_path.exists():
         verdict_path.unlink()
     _job_log(job_id, "正在截取预览截图…", "审查 unit %s" % unit_id)
-    shots = _unit_screenshots(path, unit)
-    _job_log(job_id, "已截取 %d 张预览截图。" % len(shots) if shots else "找不到 Chrome，本次没有视觉截图，审查只看源码。")
+    # Screenshots are an extra input: when Chrome fails the review still runs on the source and says so.
+    try:
+        shots = _unit_screenshots(path, unit)
+        _job_log(job_id, "已截取 %d 张预览截图。" % len(shots) if shots else "找不到 Chrome，本次没有视觉截图，审查只看源码。")
+    except Exception as exc:
+        shots = []
+        _job_log(job_id, "截图失败（%s），本次没有视觉截图，审查只看源码。" % exc)
     _job_log(job_id, "正在启动独立审查进程（%s，只读）…" % setting["engine"], "审查 unit %s" % unit_id)
     cmd = _agent_command(path, setting, _review_prompt(path, unit, shots), verdict_path=verdict_path, images=shots)
-    code, claude_data = _run_agent_command(cmd, path, setting)
-    if code != 0:
-        raise RuntimeError("审查进程退出码 %d" % code)
+    claude_data = _run_agent_command(cmd, path, setting)
     if claude_data is not None:
         verdict = claude_data.get("structured_output")
         if not isinstance(verdict, dict):
@@ -1247,9 +1272,9 @@ def start_unit_job(path, phase, unit_id):
         cmd = _agent_command(path, setting, prompt, unit_id=unit_id)
         try:
             _job_log(job_id, "正在生成 unit %s（%s）…" % (unit_id, setting["engine"]), "生成 unit %s" % unit_id)
-            run_error, code, claude_data = None, None, None
+            run_error, claude_data = None, None
             try:
-                code, claude_data = _run_agent_command(cmd, path, setting)
+                claude_data = _run_agent_command(cmd, path, setting)
             except Exception as exc:
                 run_error = exc
             # Restore before reporting anything: a timeout or crash may already have written outside the unit.
@@ -1267,8 +1292,6 @@ def start_unit_job(path, phase, unit_id):
                 )
             if run_error:
                 raise run_error
-            if code != 0:
-                raise RuntimeError("生成进程退出码 %d" % code)
             mark_unit_in_review(path, unit_id, _agent_identity(setting, claude_data))
             _job_log(job_id, "unit %s 已生成，进入审查。" % unit_id)
             _review_unit(job_id, path, unit_id)
@@ -1436,23 +1459,27 @@ def _unit_screenshots(path, unit):
 
     Real viewport heights matter: in a tall window 100vh fills the page and a sidebar that stops after
     one screen looks fine."""
-    out_dir = path / unit_dir(unit["id"]) / "screenshots"
-    shutil.rmtree(out_dir, ignore_errors=True)
+    unit_root = _unit_path(path, unit["id"])
+    out_dir = unit_root / "screenshots"
+    if out_dir.is_symlink():
+        out_dir.unlink()
+    elif out_dir.exists():
+        shutil.rmtree(out_dir)
     chrome = _chrome_binary()
     if not chrome:
         return []
     source = path / unit["files"][0]
-    # Next to the output so its relative links to dependency units still resolve.
-    page = source.with_name(".preview.html")
-    page.write_text(_with_tokens(source.read_text(encoding="utf-8", errors="replace"), token_css(path)), encoding="utf-8")
+    # In the unit directory, next to the output, so its relative links to dependency units still resolve.
+    page = unit_root / ".preview.html"
+    _write_new(page, _with_tokens(source.read_text(encoding="utf-8", errors="replace"), token_css(path)).encode("utf-8"))
     try:
         captured = _capture_views(chrome, page.as_uri())
     finally:
         page.unlink()
-    out_dir.mkdir(parents=True)
+    out_dir.mkdir()
     shots = []
     for name, data in captured.items():
-        (out_dir / name).write_bytes(data)
+        _write_new(out_dir / name, data)
         shots.append(out_dir / name)
     return shots
 
