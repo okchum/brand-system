@@ -642,6 +642,17 @@ class UiWorkbenchTest(unittest.TestCase):
             self.assertIn("no focus-visible style", job["prompt"])
             self.assertIn("Navigation misses focus state", job["prompt"])
 
+    def test_review_after_changes_requested_is_a_re_review(self):
+        # A real page unit failed six full re-audits, each finding new pre-existing issues.
+        with tempfile.TemporaryDirectory() as root:
+            workspace = self.phase_four(root)
+            unit = workbench._unit_record(json.loads((workspace / "src/ui/ir/manifest.json").read_text(encoding="utf-8")), "page-map")
+            self.assertNotIn("复审", workbench._review_prompt(workspace, unit))
+            self.review(workspace, "page-map", "changes-requested")
+            prompt = workbench._review_prompt(workspace, unit)
+            self.assertIn("复审", prompt)
+            self.assertIn("review-evidence.json", prompt)
+
     def test_regeneration_prompt_keeps_every_round_since_the_last_approval(self):
         # A real layout unit fixed a finding, lost the fix two rounds later, and was asked for it again.
         with tempfile.TemporaryDirectory() as root:

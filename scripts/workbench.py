@@ -861,16 +861,20 @@ def start_generation(path, phase):
     return job_id
 
 
+def _reviews_since_approval(path, unit_id):
+    """The unit's reviews after its latest approved one, oldest first."""
+    since = []
+    for record in _read_json(path / "project/approvals.json", []):
+        if isinstance(record, dict) and record.get("kind") == "unit-review" and record.get("unitId") == unit_id:
+            since = [] if record.get("conclusion") == APPROVED else since + [record]
+    return since
+
+
 def _unit_feedback(path, unit_id):
     """What the reviews since the unit's last approval and its status note asked for, so a regeneration can act on it."""
     lines = []
-    reviews = [record for record in _read_json(path / "project/approvals.json", [])
-               if isinstance(record, dict) and record.get("kind") == "unit-review" and record.get("unitId") == unit_id]
-    since = []
-    for review in reviews:
-        since = [] if review.get("conclusion") == APPROVED else since + [review]
     # Only the latest round used to be passed on, and fixes from earlier rounds came undone.
-    for number, review in enumerate(reversed(since[-4:])):
+    for number, review in enumerate(reversed(_reviews_since_approval(path, unit_id)[-4:])):
         lines.append(("最近一次审查（针对上一版输出）要求修改，逐条处理后重写，仍存在的问题都要解决：" if number == 0
                       else "更早一轮审查的要求，修好的不要改回去：") + "；".join(review.get("evidence", [])))
     units = _read_json(path / "project/status.json").get("units", [])
@@ -893,8 +897,17 @@ def _unit_prompt(path, unit, choice):
     return f"""只完成 UI unit「{unit['id']}」（类型 {unit.get('kind')}），把页面写到 {'、'.join(unit['files'])}。只写入 {unit_dir(unit['id'])}/ 目录；不要修改 project/、config/、src/ui/ir/、tokens/ 以及其他 unit 的目录。读取 src/ui/ir/manifest.json、config/ui.json、brand.brief.json、tokens/src/，以及依赖 unit 的输出：{inputs}。按 {ROOT / "references/ui.md"} 中该类型的要求完成（该文件只读）；颜色、字号、间距只引用 tokens/src 的 token，不复制数值。{_token_rule(path)}页面只写 var(--…)，不要 fetch token 文件，不要重新声明这些变量或内联数值。目标平台：{'、'.join(ui.get('platforms', []))}；技术栈：{ui.get('stackProfile', '')}；Desktop 与 Mobile 以 Web preview 呈现，同时写清平台语义，方便转换为 native 代码。品牌方向为 Direction {choice}。{_unit_feedback(path, unit['id'])}不要只解释，直接创建文件。"""
 
 
+def _re_review_rule(path, unit_id):
+    # Full re-audits found new pre-existing issues on every round of a large page and never converged.
+    since = _reviews_since_approval(path, unit_id)[-4:]
+    if not since:
+        return ""
+    return ("这是复审：逐条核对之前审查要求修改的问题是否修好——" + "；".join(e for r in since for e in r.get("evidence", []))
+            + "。未修好的问题和这次修改新引入的问题照常定级；上一版就已存在、这次才第一次发现的问题最多记 P2。")
+
+
 def _review_prompt(path, unit):
-    return f"""你是独立审查者，只读不写。审查 UI unit「{unit['id']}」（类型 {unit.get('kind')}）的输出 {'、'.join(unit['files'])}。对照 {ROOT / "references/ui.md"}、{ROOT / "references/accessibility.md"}、src/ui/ir/manifest.json 中该 unit 的 platforms 与 dependsOn、tokens/src/，以及依赖 unit 的输出。检查：是否满足该类型的职责，组件是否复用而不是重复造，状态（hover、focus-visible、disabled、loading、invalid、空、错误）是否齐全，颜色与间距是否只引用 token（{_token_rule(path)}页面引用的 token 变量都应在这份列表里，页面自己声明的局部变量可以存在，只是不能用来承载颜色、字号、间距的数值；页面不需要也不应自己加载 token），平台语义是否写清，可访问性。每个问题给出严重度 P0–P3、位置和具体问题：P0 页面无法打开或内容错乱；P1 功能、键盘/读屏可访问性、布局或依赖契约在真实使用中会失效；P2 不影响使用的一致性、规范或体验问题；P3 风格与可选优化。0、auto、100%、inherit、none 这类不是设计取值的写法不需要 token，不算问题。metadata.json 里的 outputHash 与 manifestHash 由工作台按自己的算法计算和绑定，不要自行核对或把它们列为问题。只有没有 P0/P1 时结论才是 approved，否则是 changes-requested。"""
+    return f"""你是独立审查者，只读不写。审查 UI unit「{unit['id']}」（类型 {unit.get('kind')}）的输出 {'、'.join(unit['files'])}。对照 {ROOT / "references/ui.md"}、{ROOT / "references/accessibility.md"}、src/ui/ir/manifest.json 中该 unit 的 platforms 与 dependsOn、tokens/src/，以及依赖 unit 的输出。检查：是否满足该类型的职责，组件是否复用而不是重复造，状态（hover、focus-visible、disabled、loading、invalid、空、错误）是否齐全，颜色与间距是否只引用 token（{_token_rule(path)}页面引用的 token 变量都应在这份列表里，页面自己声明的局部变量可以存在，只是不能用来承载颜色、字号、间距的数值；页面不需要也不应自己加载 token），平台语义是否写清，可访问性。每个问题给出严重度 P0–P3、位置和具体问题：P0 页面无法打开或内容错乱；P1 功能、键盘/读屏可访问性、布局或依赖契约在真实使用中会失效；P2 不影响使用的一致性、规范或体验问题；P3 风格与可选优化。0、auto、100%、inherit、none 这类不是设计取值的写法不需要 token，不算问题。metadata.json 里的 outputHash 与 manifestHash 由工作台按自己的算法计算和绑定，不要自行核对或把它们列为问题。{_re_review_rule(path, unit['id'])}只有没有 P0/P1 时结论才是 approved，否则是 changes-requested。"""
 
 
 # Paths a unit job may not change outside its own unit directory.
