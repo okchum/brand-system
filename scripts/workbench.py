@@ -973,9 +973,10 @@ def _review_findings(review, unit_id):
 
 
 def _unit_feedback(path, unit_id):
-    """What the reviews since the unit's last approval and its status note asked for, so a regeneration can act on it."""
+    """What the recent reviews since the unit's last approval and its status note asked for, so a regeneration can act on it."""
     lines = []
-    # Every round since the last approval, so a fix from an earlier round is not undone by the next one.
+    # The last REVIEW_ROUNDS_CARRIED rounds, not only the latest, so a fix from an earlier round is not undone by
+    # the next one; rounds before those are dropped to keep the prompt bounded.
     for number, review in enumerate(reversed(_reviews_since_approval(path, unit_id))):
         lines.append(("最近一次审查（针对上一版输出）要求修改，逐条处理后重写，仍存在的问题都要解决：" if number == 0
                       else "更早一轮审查的要求，修好的不要改回去：") + "；".join(_review_findings(review, unit_id)))
@@ -984,6 +985,11 @@ def _unit_feedback(path, unit_id):
     if note:
         lines.append("当前备注：" + note)
     return "".join(line + "。" for line in lines)
+
+
+# What a unit page may write instead of a token, shared by the generation and review prompts.
+TOKEN_USE_RULE = ("页面只写 var(--…)，不要 fetch token 文件，不要重新声明这些变量或内联数值；页面可以声明自己的局部变量，"
+                  "但只能由这些 token 变量组成，不能承载颜色、字号、间距的数值；0、auto、100%、inherit、none 这类不是设计取值的写法不需要 token。")
 
 
 def _token_rule(path):
@@ -1000,13 +1006,13 @@ def _unit_prompt(path, unit, choice):
     ui = _read_json(path / "config/ui.json", {})
     units = {item["id"]: item for item in _read_json(path / "src/ui/ir/manifest.json").get("units", [])}
     inputs = "、".join(file for dep in unit.get("dependsOn", []) for file in units.get(dep, {}).get("files", [])) or "无"
-    return f"""只完成 UI unit「{unit['id']}」（类型 {unit.get('kind')}），把页面写到 {'、'.join(unit['files'])}。只写入 {unit_dir(unit['id'])}/ 目录；不要修改 project/、config/、src/ui/ir/、tokens/ 以及其他 unit 的目录。读取 src/ui/ir/manifest.json、config/ui.json、brand.brief.json、tokens/src/，以及依赖 unit 的输出：{inputs}。按 {ROOT / "references/ui.md"} 中该类型的要求完成（该文件只读）；颜色、字号、间距只引用 tokens/src 的 token，不复制数值。{_token_rule(path)}页面只写 var(--…)，不要 fetch token 文件，不要重新声明这些变量或内联数值。目标平台：{'、'.join(ui.get('platforms', []))}；技术栈：{ui.get('stackProfile', '')}；Desktop 与 Mobile 以 Web preview 呈现，同时写清平台语义，方便转换为 native 代码。品牌方向为 Direction {choice}。{_unit_feedback(path, unit['id'])}不要只解释，直接创建文件。"""
+    return f"""只完成 UI unit「{unit['id']}」（类型 {unit.get('kind')}），把页面写到 {'、'.join(unit['files'])}。只写入 {unit_dir(unit['id'])}/ 目录；不要修改 project/、config/、src/ui/ir/、tokens/ 以及其他 unit 的目录。读取 src/ui/ir/manifest.json、config/ui.json、brand.brief.json、tokens/src/，以及依赖 unit 的输出：{inputs}。按 {ROOT / "references/ui.md"} 中该类型的要求完成（该文件只读）；颜色、字号、间距只引用 tokens/src 的 token，不复制数值。{_token_rule(path)}{TOKEN_USE_RULE}目标平台：{'、'.join(ui.get('platforms', []))}；技术栈：{ui.get('stackProfile', '')}；Desktop 与 Mobile 以 Web preview 呈现，同时写清平台语义，方便转换为 native 代码。品牌方向为 Direction {choice}。{_unit_feedback(path, unit['id'])}不要只解释，直接创建文件。"""
 
 
 def _visual_rule(path, shots):
     if not shots:
         return "本次没有视觉截图，只能从源码判断视觉。"
-    sizes = "、".join("%s %d×%d" % view for view in SCREENSHOT_VIEWS)
+    sizes = "、".join("%s %d×%d" % view[1:] for view in SCREENSHOT_VIEWS)
     return ("截图文件（" + "、".join(str(shot.relative_to(path)) for shot in shots) + "，可直接打开查看）是工作台预览在 "
             + sizes + " 下页面顶部和滚到底部的实际渲染。"
             "对照截图检查整体视觉：区块在页面下半段断开或留白、元素重叠或溢出、文字被截断、对齐与留白、层级是否清楚；按实际影响定级。")
@@ -1023,7 +1029,7 @@ def _re_review_rule(path, unit_id):
 
 
 def _review_prompt(path, unit, shots=()):
-    return f"""你是独立审查者，只读不写。审查 UI unit「{unit['id']}」（类型 {unit.get('kind')}）的输出 {'、'.join(unit['files'])}。对照 {ROOT / "references/ui.md"}、{ROOT / "references/accessibility.md"}、src/ui/ir/manifest.json 中该 unit 的 platforms 与 dependsOn、tokens/src/，以及依赖 unit 的输出。检查：是否满足该类型的职责，组件是否复用而不是重复造，状态（hover、focus-visible、disabled、loading、invalid、空、错误）是否齐全，颜色与间距是否只引用 token（{_token_rule(path)}页面引用的 token 变量都应在这份列表里，页面自己声明的局部变量可以存在，只是不能用来承载颜色、字号、间距的数值；页面不需要也不应自己加载 token），平台语义是否写清，可访问性。每个问题给出严重度 P0–P3、位置和具体问题：P0 页面无法打开或内容错乱；P1 功能、键盘/读屏可访问性、布局或依赖契约在真实使用中会失效；P2 不影响使用的一致性、规范或体验问题；P3 风格与可选优化。0、auto、100%、inherit、none 这类不是设计取值的写法不需要 token，不算问题。metadata.json 里的 outputHash 与 manifestHash 由工作台按自己的算法计算和绑定，不要自行核对或把它们列为问题。{_visual_rule(path, shots)}{_re_review_rule(path, unit['id'])}只有没有 P0/P1 时结论才是 approved，否则是 changes-requested。"""
+    return f"""你是独立审查者，只读不写。审查 UI unit「{unit['id']}」（类型 {unit.get('kind')}）的输出 {'、'.join(unit['files'])}。对照 {ROOT / "references/ui.md"}、{ROOT / "references/accessibility.md"}、src/ui/ir/manifest.json 中该 unit 的 platforms 与 dependsOn、tokens/src/，以及依赖 unit 的输出。检查：是否满足该类型的职责，组件是否复用而不是重复造，状态（hover、focus-visible、disabled、loading、invalid、空、错误）是否齐全，颜色与间距是否只引用 token（{_token_rule(path)}页面引用的 token 变量都应在这份列表里。{TOKEN_USE_RULE}），平台语义是否写清，可访问性。每个问题给出严重度 P0–P3、位置和具体问题：P0 页面无法打开或内容错乱；P1 功能、键盘/读屏可访问性、布局或依赖契约在真实使用中会失效；P2 不影响使用的一致性、规范或体验问题；P3 风格与可选优化。metadata.json 里的 outputHash 与 manifestHash 由工作台按自己的算法计算和绑定，不要自行核对或把它们列为问题。{_visual_rule(path, shots)}{_re_review_rule(path, unit['id'])}只有没有 P0/P1 时结论才是 approved，否则是 changes-requested。"""
 
 
 # Paths a unit job may not change outside its own unit directory.
@@ -1414,6 +1420,38 @@ TOKEN_NAME = re.compile(r"[A-Za-z0-9_-]+$")
 TOKEN_ALIAS = re.compile(r"\{([A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]+)*)\}")
 
 
+def _css_value_safe(value):
+    """True when value closes every string and bracket it opens and cannot end the rule or the style element.
+
+    Counting quotes is not enough: an apostrophe inside a double-quoted font name is fine, and an open bracket
+    swallows every declaration after it just as an open string does."""
+    if "<" in value or "\n" in value or "\r" in value:
+        return False
+    quote, depth, i = None, 0, 0
+    while i < len(value):
+        char = value[i]
+        if char == "\\":
+            if i + 1 >= len(value):
+                return False
+            i += 2
+            continue
+        if quote:
+            if char == quote:
+                quote = None
+        elif char in "\"'":
+            quote = char
+        elif value.startswith("/*", i) or char in ";{}":
+            return False
+        elif char == "(":
+            depth += 1
+        elif char == ")":
+            depth -= 1
+            if depth < 0:
+                return False
+        i += 1
+    return quote is None and depth == 0
+
+
 def _token_declarations(path):
     """tokens/src flattened to CSS custom properties, plus what was left out and why it was.
 
@@ -1429,9 +1467,8 @@ def _token_declarations(path):
             if isinstance(value, (str, int, float)) and not isinstance(value, bool):
                 name = "--" + "-".join(names + [key])
                 value = TOKEN_ALIAS.sub(lambda m: "var(--%s)" % m.group(1).replace(".", "-"), str(value))
-                # Dropped rather than escaped: such a value could close the rule or the style element, and an open
-                # string or comment would swallow every declaration after it.
-                if re.search(r"[;{}<>\\\n]|/\*|\*/", value) or value.count('"') % 2 or value.count("'") % 2:
+                # Dropped rather than escaped: such a value would end the rule or swallow every declaration after it.
+                if not _css_value_safe(value):
                     skipped.append(name)
                 else:
                     declarations.append("%s:%s;" % (name, value))
@@ -1459,12 +1496,14 @@ def token_css(path):
 
 def _with_tokens(html, css):
     tag = "<style data-brand-tokens>%s</style>" % css
-    # Inside <head> when there is one; never before the doctype, which would put the page in quirks mode.
-    match = re.search(r"<head(?:\s[^>]*)?>", html, re.IGNORECASE) or re.search(r"<!doctype[^>]*>", html, re.IGNORECASE)
+    # Inside <head> when there is one; never before the doctype, which would put the page in quirks mode. A
+    # "<head>" inside a comment or a script is text, so those spans are blanked out before searching.
+    masked = re.sub(r"<!--.*?-->|<script\b.*?</script\s*>", lambda m: " " * len(m.group()), html, flags=re.IGNORECASE | re.DOTALL)
+    match = re.search(r"<head(?:\s[^>]*)?>", masked, re.IGNORECASE) or re.search(r"<!doctype[^>]*>", masked, re.IGNORECASE)
     return html[:match.end()] + tag + html[match.end():] if match else tag + html
 
 
-SCREENSHOT_VIEWS = (("desktop", 1280, 800), ("mobile", 390, 844))
+SCREENSHOT_VIEWS = (("desktop", "桌面", 1280, 800), ("mobile", "手机", 390, 844))
 
 
 def _chrome_binary():
@@ -1548,7 +1587,7 @@ def _capture_views(chrome, url):
             target = browser.call("Target.createTarget", url="about:blank")["targetId"]
             browser.session = browser.call("Target.attachToTarget", targetId=target, flatten=True)["sessionId"]
             browser.call("Page.enable")
-            for name, width, height in SCREENSHOT_VIEWS:
+            for name, _label, width, height in SCREENSHOT_VIEWS:
                 browser.call("Emulation.setDeviceMetricsOverride", width=width, height=height, deviceScaleFactor=1, mobile=width < 600)
                 browser.call("Page.navigate", url=url)
                 browser.wait_event("Page.loadEventFired")

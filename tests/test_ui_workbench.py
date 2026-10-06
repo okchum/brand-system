@@ -1366,6 +1366,20 @@ class UiWorkbenchHttpTest(unittest.TestCase):
         self.assertIn("--font-open", rule)
         self.assertIn("tokens/src/linked.json", rule)
 
+    def test_token_values_must_close_every_string_and_bracket(self):
+        accepted = ['"Kid\'s Font", serif', '"\\201C"', '"a;b"', "calc(1px + var(--space-4))", "#fff"]
+        rejected = ['"\'" \'', "calc(1px", "url(x", "a /* b", "red;}", "</style>", "a\nb", "x\\"]
+        for value in accepted:
+            self.assertTrue(workbench._css_value_safe(value), value)
+        for value in rejected:
+            self.assertFalse(workbench._css_value_safe(value), value)
+
+    def test_tokens_skip_a_head_tag_inside_a_comment_or_script(self):
+        css = ":root{}"
+        html = "<!-- <head> --><script>var s='<head>'</script><html><head><title>t</title>"
+        out = workbench._with_tokens(html, css)
+        self.assertTrue(out.startswith("<!-- <head> --><script>var s='<head>'</script><html><head><style data-brand-tokens>"), out)
+
     def test_tokens_go_into_head_not_a_header_or_before_the_doctype(self):
         css = ":root{}"
         self.assertEqual(workbench._with_tokens("<!doctype html><header>h</header>", css),
