@@ -1376,6 +1376,13 @@ def _review_unit(job_id, path, unit_id):
         or any(not isinstance(item, dict) or item.get("severity") not in ("P0", "P1", "P2", "P3") for item in findings)
     ):
         raise ValueError("审查结论不符合 assets/unit-review-verdict.schema.json")
+    # The rule is "approved only without P0/P1", so the findings decide, not the reviewer's own label: a label that
+    # disagrees would either approve a unit with a P1 or hold one back over a P2.
+    blocking = any(item["severity"] in ("P0", "P1") for item in findings)
+    conclusion = CHANGES_REQUESTED if blocking else APPROVED
+    if conclusion != verdict["conclusion"]:
+        _job_log(job_id, "审查进程写的结论是 %s，但问题严重度对应 %s，按严重度记录。" % (verdict["conclusion"], conclusion))
+        verdict["conclusion"] = conclusion
     with STATE_LOCK:
         if check_workspace.unit_output_hash(path, unit) != digest:
             raise ValueError("审查期间输出被改动，这次结论作废")

@@ -625,6 +625,22 @@ class UiWorkbenchTest(unittest.TestCase):
                 self.assertEqual(tall[view + "-bottom.png"], only_blue[view + "-top.png"], view)
                 self.assertNotEqual(tall[view + "-top.png"], tall[view + "-bottom.png"], view)
 
+    def test_the_review_conclusion_follows_the_severity_of_its_findings(self):
+        # A reviewer once wrote changes-requested with only a P2 listed; the opposite would approve a unit with a P1.
+        cases = (
+            ({"conclusion": "approved", "summary": "ok", "findings": [{"severity": "P1", "location": "nav", "problem": "no focus"}]},
+             "changes-requested"),
+            ({"conclusion": "changes-requested", "summary": "minor", "findings": [{"severity": "P2", "location": "nav", "problem": "44px"}]},
+             "approved"),
+        )
+        for verdict, expected in cases:
+            with self.subTest(expected=expected), tempfile.TemporaryDirectory() as root:
+                workspace = self.phase_four(root)
+                job, _ = self.run_unit_job(workspace, "page-map", verdict=verdict)
+                self.assertEqual(job["status"], "done", job)
+                self.assertEqual(self.unit_status(workspace, "page-map")["status"], expected)
+                self.assertEqual(self.read(root, "project/approvals.json")[-1]["conclusion"], expected)
+
     def test_unit_job_generates_then_runs_independent_read_only_review(self):
         with tempfile.TemporaryDirectory() as root:
             workspace = self.phase_four(root)
