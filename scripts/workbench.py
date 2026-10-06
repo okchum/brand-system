@@ -894,7 +894,7 @@ def _unit_prompt(path, unit, choice):
 
 
 def _review_prompt(path, unit):
-    return f"""你是独立审查者，只读不写。审查 UI unit「{unit['id']}」（类型 {unit.get('kind')}）的输出 {'、'.join(unit['files'])}。对照 {ROOT / "references/ui.md"}、{ROOT / "references/accessibility.md"}、src/ui/ir/manifest.json 中该 unit 的 platforms 与 dependsOn、tokens/src/，以及依赖 unit 的输出。检查：是否满足该类型的职责，组件是否复用而不是重复造，状态（hover、focus-visible、disabled、loading、invalid、空、错误）是否齐全，颜色与间距是否只引用 token（{_token_rule(path)}页面引用的 token 变量都应在这份列表里，页面自己声明的局部变量可以存在，只是不能用来承载颜色、字号、间距的数值；页面不需要也不应自己加载 token），平台语义是否写清，可访问性。每个问题给出严重度 P0–P3、位置和具体问题。metadata.json 里的 outputHash 与 manifestHash 由工作台按自己的算法计算和绑定，不要自行核对或把它们列为问题。只有没有 P0/P1 时结论才是 approved，否则是 changes-requested。"""
+    return f"""你是独立审查者，只读不写。审查 UI unit「{unit['id']}」（类型 {unit.get('kind')}）的输出 {'、'.join(unit['files'])}。对照 {ROOT / "references/ui.md"}、{ROOT / "references/accessibility.md"}、src/ui/ir/manifest.json 中该 unit 的 platforms 与 dependsOn、tokens/src/，以及依赖 unit 的输出。检查：是否满足该类型的职责，组件是否复用而不是重复造，状态（hover、focus-visible、disabled、loading、invalid、空、错误）是否齐全，颜色与间距是否只引用 token（{_token_rule(path)}页面引用的 token 变量都应在这份列表里，页面自己声明的局部变量可以存在，只是不能用来承载颜色、字号、间距的数值；页面不需要也不应自己加载 token），平台语义是否写清，可访问性。每个问题给出严重度 P0–P3、位置和具体问题：P0 页面无法打开或内容错乱；P1 功能、键盘/读屏可访问性、布局或依赖契约在真实使用中会失效；P2 不影响使用的一致性、规范或体验问题；P3 风格与可选优化。0、auto、100%、inherit、none 这类不是设计取值的写法不需要 token，不算问题。metadata.json 里的 outputHash 与 manifestHash 由工作台按自己的算法计算和绑定，不要自行核对或把它们列为问题。只有没有 P0/P1 时结论才是 approved，否则是 changes-requested。"""
 
 
 # Paths a unit job may not change outside its own unit directory.

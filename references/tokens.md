@@ -36,4 +36,4 @@ primitive → semantic → component 是变量依赖层级，不代表 Logo 几�
 
 `tokens/src/` 是唯一 token SSOT。`config/ui.json` 只能用固定的 `tokenSource: "tokens/src"` 指向它，不能在 UI config、IR manifest 或 unit review 中复制颜色、间距、字体等 token 值。`html-css-js` 与 `react` 是初始 stack profile；没有对应工具链时，交付状态只能为 `preview-only` 或 `handoff-ready`，文档和审阅记录不得声称 native runtime 已实现。
 
-UI unit 的输出页面不自己加载 token：工作台打开 `src/ui/` 下的页面时，把 `tokens/src/` 展开成 CSS 变量插进 `<head>`。叶子是带 `$value` 或 `value` 的对象，变量名是它的 JSON 路径用 `-` 连接（`color.light.canvas` → `--color-light-canvas`，`space.4` → `--space-4`），值里的 `{a.b}` 引用变成 `var(--a-b)`。页面只写 `var(--…)`，不 fetch token 文件，不重新声明这些变量，也不内联数值；这样 token 值仍只在 `tokens/src/` 一处，而沙箱里的预览照样有样式。
+UI unit 的输出页面不自己加载 token：工作台打开 `src/ui/` 下的页面时，把 `tokens/src/` 展开成 CSS 变量插进 `<head>`。叶子是带 `$value` 或 `value` 的对象，变量名是它的 JSON 路径用 `-` 连接（`color.light.canvas` → `--color-light-canvas`，`space.4` → `--space-4`），值里的 `{a.b}` 引用变成 `var(--a-b)`。页面只写 `var(--…)`，不 fetch token 文件，不重新声明这些变量，也不内联数值；`0`、`auto`、`100%`、`inherit`、`none` 这类不是设计取值的写法不需要 token；这样 token 值仍只在 `tokens/src/` 一处，而沙箱里的预览照样有样式。
