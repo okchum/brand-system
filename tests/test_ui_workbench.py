@@ -632,6 +632,9 @@ class UiWorkbenchTest(unittest.TestCase):
              "changes-requested"),
             ({"conclusion": "changes-requested", "summary": "minor", "findings": [{"severity": "P2", "location": "nav", "problem": "44px"}]},
              "approved"),
+            # No finding gives a severity to judge by, so the reviewer's own label stands.
+            ({"conclusion": "changes-requested", "summary": "focus is lost after closing the menu", "findings": []},
+             "changes-requested"),
         )
         for verdict, expected in cases:
             with self.subTest(expected=expected), tempfile.TemporaryDirectory() as root:
@@ -640,6 +643,9 @@ class UiWorkbenchTest(unittest.TestCase):
                 self.assertEqual(job["status"], "done", job)
                 self.assertEqual(self.unit_status(workspace, "page-map")["status"], expected)
                 self.assertEqual(self.read(root, "project/approvals.json")[-1]["conclusion"], expected)
+                record = self.read(root, "project/approvals.json")[-1]
+                overridden = verdict["conclusion"] != expected
+                self.assertEqual(any("按严重度记为" in item for item in record["evidence"]), overridden)
 
     def test_unit_job_generates_then_runs_independent_read_only_review(self):
         with tempfile.TemporaryDirectory() as root:

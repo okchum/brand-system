@@ -1376,17 +1376,22 @@ def _review_unit(job_id, path, unit_id):
         or any(not isinstance(item, dict) or item.get("severity") not in ("P0", "P1", "P2", "P3") for item in findings)
     ):
         raise ValueError("审查结论不符合 assets/unit-review-verdict.schema.json")
-    # The rule is "approved only without P0/P1", so the findings decide, not the reviewer's own label: a label that
-    # disagrees would either approve a unit with a P1 or hold one back over a P2.
-    blocking = any(item["severity"] in ("P0", "P1") for item in findings)
-    conclusion = CHANGES_REQUESTED if blocking else APPROVED
-    if conclusion != verdict["conclusion"]:
-        _job_log(job_id, "审查进程写的结论是 %s，但问题严重度对应 %s，按严重度记录。" % (verdict["conclusion"], conclusion))
-        verdict["conclusion"] = conclusion
+    # The rule is "approved only without P0/P1", so listed findings decide, not the reviewer's own label: a label that
+    # disagrees would either approve a unit with a P1 or hold one back over a P2. With nothing listed there is no
+    # severity to judge by, and the reviewer's label stands.
+    original = verdict["conclusion"]
+    if any(item["severity"] in ("P0", "P1") for item in findings):
+        verdict["conclusion"] = CHANGES_REQUESTED
+    elif findings:
+        verdict["conclusion"] = APPROVED
+    if verdict["conclusion"] != original:
+        _job_log(job_id, "审查进程写的结论是 %s，但问题严重度对应 %s，按严重度记录。" % (original, verdict["conclusion"]))
     with STATE_LOCK:
         if check_workspace.unit_output_hash(path, unit) != digest:
             raise ValueError("审查期间输出被改动，这次结论作废")
-        evidence = [str(verdict_path.relative_to(path)), verdict["summary"].strip()] + [
+        evidence = [str(verdict_path.relative_to(path)), verdict["summary"].strip()] + (
+            ["审查进程原结论 %s，按严重度记为 %s" % (original, verdict["conclusion"])] if verdict["conclusion"] != original else []
+        ) + [
             "%s %s：%s" % (item["severity"], item.get("location", ""), item.get("problem", "")) for item in findings
         ]
         scope = [
