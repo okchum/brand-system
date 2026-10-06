@@ -837,11 +837,17 @@ def start_generation(path, phase):
 
 
 def _unit_feedback(path, unit_id):
-    """What the last review and the unit's status note asked for, so a regeneration can act on it."""
+    """What the reviews since the unit's last approval and its status note asked for, so a regeneration can act on it."""
     lines = []
-    review = check_workspace.latest_unit_reviews(_read_json(path / "project/approvals.json", [])).get(unit_id)
-    if review and review.get("conclusion") == CHANGES_REQUESTED:
-        lines.append("最近一次审查（针对上一版输出）要求修改，逐条处理后重写，仍存在的问题都要解决：" + "；".join(review.get("evidence", [])))
+    reviews = [record for record in _read_json(path / "project/approvals.json", [])
+               if isinstance(record, dict) and record.get("kind") == "unit-review" and record.get("unitId") == unit_id]
+    since = []
+    for review in reviews:
+        since = [] if review.get("conclusion") == APPROVED else since + [review]
+    # Only the latest round used to be passed on, and fixes from earlier rounds came undone.
+    for number, review in enumerate(reversed(since[-4:])):
+        lines.append(("最近一次审查（针对上一版输出）要求修改，逐条处理后重写，仍存在的问题都要解决：" if number == 0
+                      else "更早一轮审查的要求，修好的不要改回去：") + "；".join(review.get("evidence", [])))
     units = _read_json(path / "project/status.json").get("units", [])
     note = next((item.get("note") for item in units if isinstance(item, dict) and item.get("unitId") == unit_id), "")
     if note:
@@ -863,7 +869,7 @@ def _unit_prompt(path, unit, choice):
 
 
 def _review_prompt(path, unit):
-    return f"""你是独立审查者，只读不写。审查 UI unit「{unit['id']}」（类型 {unit.get('kind')}）的输出 {'、'.join(unit['files'])}。对照 {ROOT / "references/ui.md"}、{ROOT / "references/accessibility.md"}、src/ui/ir/manifest.json 中该 unit 的 platforms 与 dependsOn、tokens/src/，以及依赖 unit 的输出。检查：是否满足该类型的职责，组件是否复用而不是重复造，状态（hover、focus-visible、disabled、loading、invalid、空、错误）是否齐全，颜色与间距是否只引用 token（{_token_rule(path)}页面引用的变量都应在这份列表里；页面不需要也不应自己加载 token），平台语义是否写清，可访问性。每个问题给出严重度 P0–P3、位置和具体问题。metadata.json 里的 outputHash 与 manifestHash 由工作台按自己的算法计算和绑定，不要自行核对或把它们列为问题。只有没有 P0/P1 时结论才是 approved，否则是 changes-requested。"""
+    return f"""你是独立审查者，只读不写。审查 UI unit「{unit['id']}」（类型 {unit.get('kind')}）的输出 {'、'.join(unit['files'])}。对照 {ROOT / "references/ui.md"}、{ROOT / "references/accessibility.md"}、src/ui/ir/manifest.json 中该 unit 的 platforms 与 dependsOn、tokens/src/，以及依赖 unit 的输出。检查：是否满足该类型的职责，组件是否复用而不是重复造，状态（hover、focus-visible、disabled、loading、invalid、空、错误）是否齐全，颜色与间距是否只引用 token（{_token_rule(path)}页面引用的 token 变量都应在这份列表里，页面自己声明的局部变量可以存在，只是不能用来承载颜色、字号、间距的数值；页面不需要也不应自己加载 token），平台语义是否写清，可访问性。每个问题给出严重度 P0–P3、位置和具体问题。metadata.json 里的 outputHash 与 manifestHash 由工作台按自己的算法计算和绑定，不要自行核对或把它们列为问题。只有没有 P0/P1 时结论才是 approved，否则是 changes-requested。"""
 
 
 # Paths a unit job may not change outside its own unit directory.

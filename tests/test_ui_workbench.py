@@ -640,6 +640,26 @@ class UiWorkbenchTest(unittest.TestCase):
             self.assertIn("no focus-visible style", job["prompt"])
             self.assertIn("Navigation misses focus state", job["prompt"])
 
+    def test_regeneration_prompt_keeps_every_round_since_the_last_approval(self):
+        # A real layout unit fixed a finding, lost the fix two rounds later, and was asked for it again.
+        with tempfile.TemporaryDirectory() as root:
+            workspace = self.phase_four(root)
+            self.review(workspace, "page-map")
+            for problem in ("old approved-era issue", "focus ring too faint", "skip link missing"):
+                write_output(workspace, "page-map", "<main>%s</main>\n" % problem)
+                workbench.begin_unit_generation(workspace, "page-map")
+                workbench.mark_unit_in_review(workspace, "page-map")
+                workbench.append_unit_review(
+                    workspace, "page-map", "approved" if problem.startswith("old") else "changes-requested",
+                    reviewer=REVIEWER, evidence=["review.json", "P1 " + problem],
+                    file_scope=[{"path": workbench.unit_output_path("page-map"), "startLine": 1, "endLine": 1}],
+                    output_hash=current_output_hash(workspace, "page-map"),
+                )
+            feedback = workbench._unit_feedback(workspace, "page-map")
+            self.assertIn("focus ring too faint", feedback)
+            self.assertIn("skip link missing", feedback)
+            self.assertNotIn("old approved-era issue", feedback)
+
     def test_phase_job_cannot_change_approvals_units_or_unit_progress(self):
         with tempfile.TemporaryDirectory() as root:
             workspace = self.phase_four(root)
