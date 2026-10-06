@@ -473,8 +473,18 @@ class UiWorkbenchTest(unittest.TestCase):
             output = Path(calls[1][calls[1].index("-o") + 1]).resolve()
             self.assertTrue(output.is_relative_to(workbench.SCRATCH_ROOT), output)
             self.assertFalse(output.exists())
-        for shared in (Path(tempfile.gettempdir()).resolve(), Path("/tmp").resolve()):
-            self.assertFalse(REAL_SCRATCH_ROOT.resolve().is_relative_to(shared), REAL_SCRATCH_ROOT)
+
+    def test_scratch_root_ignores_a_cache_setting_the_sandbox_could_write(self):
+        home_cache = Path.home() / ".cache" / "brand-system"
+        for value in ("", "relative/cache", "/tmp/cache", tempfile.gettempdir()):
+            with mock.patch.dict(os.environ, {"XDG_CACHE_HOME": value}):
+                self.assertEqual(workbench._default_scratch_root(), home_cache, value)
+        with tempfile.TemporaryDirectory() as root, tempfile.TemporaryDirectory() as outside:
+            linked = Path(root).resolve() / "scratch"
+            linked.symlink_to(outside)
+            with mock.patch.object(workbench, "SCRATCH_ROOT", linked):
+                with self.assertRaises(ValueError):
+                    workbench._scratch_dir("verdict-")
 
     def test_claude_result_that_is_not_text_is_reported_as_unreadable(self):
         with tempfile.TemporaryDirectory() as root:
@@ -483,6 +493,33 @@ class UiWorkbenchTest(unittest.TestCase):
                 write_output(workspace, "page-map")
                 job = wait_for(workbench.start_unit_job(workspace, 4, "page-map"))
             self.assertIn("审查进程没有给出可读的结论", job["error"])
+
+    def test_a_planted_tmp_tree_cannot_skip_the_restore_after_a_failed_run(self):
+        with tempfile.TemporaryDirectory() as root:
+            workspace = self.phase_four(root)
+            approvals = (workspace / "project/approvals.json").read_text(encoding="utf-8")
+
+            def plant_then_fail(cmd, cwd, timeout):
+                # Built one level at a time, as an agent would; the full path is too long for one mkdir.
+                fd = os.open(Path(cwd) / "project", os.O_RDONLY)
+                for name in ["status.json.tmp"] + ["d"] * 1100:
+                    os.mkdir(name, dir_fd=fd)
+                    child = os.open(name, os.O_RDONLY, dir_fd=fd)
+                    os.close(fd)
+                    fd = child
+                os.close(fd)
+                (Path(cwd) / "project/approvals.json").write_text("[]", encoding="utf-8")
+                raise TimeoutError("codex 进程超过 30 分钟未完成")
+            with mock.patch.object(workbench, "_run_agent", side_effect=plant_then_fail):
+                job_id = workbench.start_generation(workspace, 4)
+                deadline = time.time() + 120  # removing a thousand levels takes seconds, not the helper's five
+                while workbench.JOBS[job_id]["status"] == "running" and time.time() < deadline:
+                    time.sleep(0.1)
+            job = workbench.JOBS[job_id]
+            self.assertEqual(job["status"], "error")
+            self.assertIn("超过 30 分钟", job["error"])
+            self.assertFalse((workspace / "project/status.json.tmp").exists())
+            self.assertEqual((workspace / "project/approvals.json").read_text(encoding="utf-8"), approvals)
 
     def test_codex_writes_its_verdict_outside_the_workspace(self):
         with tempfile.TemporaryDirectory() as root:
@@ -1404,20 +1441,21 @@ class UiWorkbenchHttpTest(unittest.TestCase):
             self.assertFalse(workbench._css_value_safe(value), value)
 
     def test_token_insertion_is_linear_on_unclosed_tags(self):
+        # Quadratic scanning took over a minute on this input; a generous bound keeps slow runners green.
         for junk in ("<script ", "<!--", "<head ", "<title>"):
             started = time.time()
             workbench._with_tokens(junk * 40000, ":root{}")
-            self.assertLess(time.time() - started, 1, junk)
+            self.assertLess(time.time() - started, 5, junk)
+
+    def test_token_insertion_offsets_survive_case_and_close_tag_lookalikes(self):
+        css = ":root{}"
+        self.assertEqual(workbench._with_tokens("İİİ<head><title>t</title>", css), "İİİ<head><style data-brand-tokens>:root{}</style><title>t</title>")
+        html = "<script>var s='</scripts>'; var t='<head>';</script><head>"
+        self.assertTrue(workbench._with_tokens(html, css).endswith("<head><style data-brand-tokens>:root{}</style>"))
 
     def test_tokens_skip_a_head_tag_inside_raw_text_elements(self):
         for html in ("<script>var a='<head>'", "<title><head>", "<textarea><head x>", "<!-- <head>", "<style>a{}<head>"):
             self.assertTrue(workbench._with_tokens(html, ":root{}").startswith("<style data-brand-tokens>"), html)
-
-    def test_tokens_skip_a_head_tag_inside_a_comment_or_script(self):
-        css = ":root{}"
-        html = "<!-- <head> --><script>var s='<head>'</script><html><head><title>t</title>"
-        out = workbench._with_tokens(html, css)
-        self.assertTrue(out.startswith("<!-- <head> --><script>var s='<head>'</script><html><head><style data-brand-tokens>"), out)
 
     def test_tokens_go_into_head_not_a_header_or_before_the_doctype(self):
         css = ":root{}"

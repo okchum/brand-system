@@ -10,6 +10,7 @@ The server only writes inside the selected workspace after an explicit UI action
 """
 import argparse
 import collections
+import contextlib
 import copy
 import errno
 import base64
@@ -124,12 +125,34 @@ def _read_json(path, default=None):
 _DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
 # Scratch files the workbench writes outside the workspace. codex's workspace-write sandbox can write the workspace,
 # $TMPDIR and /tmp, so none of those can hold files an agent must not swap; the user's cache directory is outside it.
-SCRATCH_ROOT = Path(os.environ.get("XDG_CACHE_HOME") or Path.home() / ".cache") / "brand-system"
+def _default_scratch_root():
+    # XDG_CACHE_HOME is honoured only when it is an absolute path outside the temp directories the sandbox can write.
+    cache = os.environ.get("XDG_CACHE_HOME") or ""
+    shared = [Path(tempfile.gettempdir()).resolve(), Path("/tmp").resolve()]
+    if not os.path.isabs(cache) or any(Path(cache).resolve().is_relative_to(root) for root in shared):
+        cache = str(Path.home() / ".cache")
+    return Path(cache) / "brand-system"
+
+
+SCRATCH_ROOT = _default_scratch_root()
 
 
 def _scratch_dir(prefix):
     SCRATCH_ROOT.mkdir(parents=True, exist_ok=True, mode=0o700)
+    if SCRATCH_ROOT.is_symlink() or not SCRATCH_ROOT.is_dir():
+        raise ValueError("%s 不是真实目录，拒绝在这里存放工作台的临时文件" % SCRATCH_ROOT)
+    os.chmod(SCRATCH_ROOT, 0o700)
     return tempfile.mkdtemp(prefix=prefix, dir=SCRATCH_ROOT)
+
+
+@contextlib.contextmanager
+def _scratch(prefix):
+    """A scratch directory for one agent or browser run, removed afterwards."""
+    directory = Path(_scratch_dir(prefix))
+    try:
+        yield directory
+    finally:
+        shutil.rmtree(directory, ignore_errors=True)
 
 
 def _open_dir(directory, create=True):
@@ -137,8 +160,8 @@ def _open_dir(directory, create=True):
 
     The workbench is not sandboxed, but a process an agent leaves running can swap any directory in the workspace
     for a link at any moment; checking a path and then writing to it would follow that link out of the workspace.
-    Every helper below that takes a path relies on this, so their callers pass resolved paths (each public entry
-    point resolves the workspace first); a link anywhere on the way can then only have been planted."""
+    The path helpers built on it (_remove, _write_new, _write_atomic, _write_json) therefore need resolved paths;
+    each public entry point resolves the workspace first, so a link anywhere on the way can only have been planted."""
     fd = os.open("/", _DIR_FLAGS)
     try:
         for part in Path(directory).absolute().parts[1:]:
@@ -171,30 +194,44 @@ def _remove_entry(dir_fd, name):
     if not stat.S_ISDIR(mode):
         os.unlink(name, dir_fd=dir_fd)
         return
-    child = os.open(name, _DIR_FLAGS, dir_fd=dir_fd)
+    # Depth first without recursion and with one handle besides dir_fd, so a tree an agent nests thousands of levels
+    # deep neither exhausts the stack nor the process's file handles. ".." is never a link; a directory the agent
+    # moves meanwhile can only move within the workspace it can write.
+    fd, below = os.open(name, _DIR_FLAGS, dir_fd=dir_fd), []
     try:
-        with os.scandir(child) as entries:
-            names = [entry.name for entry in entries]
-        for entry in names:
-            _remove_entry(child, entry)
+        while True:
+            subdir = None
+            with os.scandir(fd) as entries:
+                for entry in entries:
+                    if entry.is_dir(follow_symlinks=False):
+                        subdir = subdir or entry.name
+                    else:
+                        os.unlink(entry.name, dir_fd=fd)
+            if subdir is not None:
+                child = os.open(subdir, _DIR_FLAGS, dir_fd=fd)
+                os.close(fd)
+                fd = child
+                below.append(subdir)
+            elif below:
+                parent = os.open("..", _DIR_FLAGS, dir_fd=fd)
+                os.close(fd)
+                fd = parent
+                os.rmdir(below.pop(), dir_fd=fd)
+            else:
+                break
     finally:
-        os.close(child)
+        os.close(fd)
     os.rmdir(name, dir_fd=dir_fd)
 
 
 def _remove(target):
-    """Delete target, file or directory tree, through directory handles. Very deep trees an agent built can run
-    out of handles; that is reported as a refusal rather than half done silently."""
+    """Delete target, a file or a whole directory tree, through directory handles."""
     try:
         fd = _open_dir(target.parent, create=False)
     except FileNotFoundError:
         return
     try:
         _remove_entry(fd, target.name)
-    except (RecursionError, OSError) as exc:
-        if isinstance(exc, OSError) and exc.errno != errno.EMFILE:
-            raise
-        raise ValueError("%s 的目录层级过深，拒绝删除" % target) from exc
     finally:
         os.close(fd)
 
@@ -213,8 +250,10 @@ def _write_new(target, data):
 
 def _write_atomic(target, data):
     """Write then rename, so a concurrent /api/state poll never reads half a file. Both steps happen inside one
-    directory handle, and the rename only goes ahead if the temporary file is still the one just written: a link
-    swapped in at that name would otherwise become the target, and later reads would follow it out."""
+    directory handle, so nothing is written outside the workspace. Checking that the temporary file is still the
+    one just written narrows, but cannot close, the window in which a link swapped in at that name becomes the
+    target; such a link only redirects later reads, which an agent can already cause by planting the target as a
+    link itself, and the next write replaces it."""
     temporary = target.name + ".tmp"
     fd = _open_dir(target.parent)
     try:
@@ -233,11 +272,6 @@ def _write_atomic(target, data):
 
 def _write_json(path, payload):
     _write_atomic(path, (json.dumps(payload, ensure_ascii=False, indent=2) + "\n").encode("utf-8"))
-
-
-def _unit_path(path, unit_id):
-    """The unit's directory; writes into it go through _open_dir, which refuses it if it has become a link."""
-    return path / unit_dir(unit_id)
 
 
 def _validate_ui_selection(stack_profile, platforms):
@@ -394,7 +428,7 @@ def mark_unit_in_review(path, unit_id, generated_by=None):
         }
         if generated_by:
             metadata["generatedBy"] = generated_by
-        _write_json(_unit_path(path, unit_id) / "metadata.json", metadata)
+        _write_json(path / unit_dir(unit_id) / "metadata.json", metadata)
         return metadata
 
 
@@ -947,9 +981,15 @@ def start_generation(path, phase):
             except Exception as exc:
                 run_error = exc
             # A run that died may already have written that the phase is done; status is the progress authority,
-            # so it goes back before any other error is reported.
+            # so it goes back first. Whatever happens there, the protected files below are still restored.
+            status_error = None
             if run_error:
-                _write_atomic(path / "project/status.json", status_before)
+                try:
+                    _write_atomic(path / "project/status.json", status_before)
+                except Exception as exc:
+                    status_error = exc
+            if status_error:
+                run_error = RuntimeError("%s；恢复 project/status.json 时出错：%s" % (run_error, status_error))
             # Approvals, the UI manifest, unit outputs and unit progress belong to other flows.
             try:
                 changed = _restore(path, PHASE_PROTECTED_ROOTS, before) + _restore_unit_progress(path, status_before)
@@ -1120,12 +1160,18 @@ def _restore(path, roots, before, excluded=None):
     changed = sorted(rel for rel in set(before) | set(after) if before.get(rel) != after.get(rel))
     if not changed:
         return []
-    backup = Path(_scratch_dir("restore-"))
+    try:
+        backup = Path(_scratch_dir("restore-"))
+    except (OSError, ValueError) as exc:
+        backup, unsaved = None, exc  # restoring the protected files matters more than keeping a copy
     reported = []
     # Copy everything out before touching anything: removing a replaced directory below also removes its files.
     for rel in changed:
         if rel not in after:
             reported.append(rel)
+            continue
+        if backup is None:
+            reported.append("%s（改动后的版本没能保存：%s）" % (rel, unsaved))
             continue
         link = isinstance(after[rel], tuple)
         kept = backup / ("links" if link else "files") / rel
@@ -1151,7 +1197,7 @@ def _restore(path, roots, before, excluded=None):
             else:
                 _write_new(target, before[rel])
     except Exception as exc:
-        raise RuntimeError("恢复没有完成（%s）；改动前后的版本保存在 %s" % (exc, backup))
+        raise RuntimeError("恢复没有完成（%s）；改动后的版本%s" % (exc, "保存在 %s" % backup if backup else "没能保存"))
     return reported
 
 
@@ -1268,13 +1314,10 @@ def _run_agent_command(cmd, path, setting):
     if setting["engine"] != "claude":
         _run_agent(cmd, path, AGENT_TIMEOUT)
         return None
-    scratch = _scratch_dir("claude-")
-    try:
-        output_path = Path(scratch) / "result.json"
+    with _scratch("claude-") as scratch:
+        output_path = scratch / "result.json"
         _run_agent(cmd, path, AGENT_TIMEOUT, output_path=output_path)
         return _claude_result(output_path)
-    finally:
-        shutil.rmtree(scratch, ignore_errors=True)
 
 
 def _agent_identity(setting, claude_data=None):
@@ -1296,7 +1339,7 @@ def _review_unit(job_id, path, unit_id):
     unit = _unit_record(_read_json(path / "src/ui/ir/manifest.json"), unit_id)
     setting = _agent_setting(path, "review")
     digest = check_workspace.unit_output_hash(path, unit)
-    verdict_path = _unit_path(path, unit_id) / "review.json"
+    verdict_path = path / unit_dir(unit_id) / "review.json"
     _remove(verdict_path)
     _job_log(job_id, "正在截取预览截图…", "审查 unit %s" % unit_id)
     # Screenshots are an extra input: when Chrome fails the review still runs on the source and says so.
@@ -1309,9 +1352,8 @@ def _review_unit(job_id, path, unit_id):
     _job_log(job_id, "正在启动独立审查进程（%s，只读）…" % setting["engine"], "审查 unit %s" % unit_id)
     # The codex CLI writes its last message itself, outside its sandbox; it gets a file outside the workspace so
     # nothing an agent planted there can redirect it. The workbench copies the verdict in afterwards.
-    scratch = _scratch_dir("verdict-")
-    try:
-        output = Path(scratch) / "review.json"
+    with _scratch("verdict-") as scratch:
+        output = scratch / "review.json"
         cmd = _agent_command(path, setting, _review_prompt(path, unit, shots), verdict_path=output, images=shots)
         claude_data = _run_agent_command(cmd, path, setting)
         try:
@@ -1323,8 +1365,6 @@ def _review_unit(job_id, path, unit_id):
                 verdict = json.loads(output.read_text(encoding="utf-8"))
         except (OSError, ValueError, TypeError):
             raise ValueError("审查进程没有给出可读的结论")
-    finally:
-        shutil.rmtree(scratch, ignore_errors=True)
     _write_json(verdict_path, verdict)
     findings = verdict.get("findings") if isinstance(verdict, dict) else None
     if (
@@ -1524,14 +1564,16 @@ def token_css(path):
 
 
 RAW_TEXT_ELEMENTS = ("script", "style", "title", "textarea")
+_ASCII_LOWER = str.maketrans("ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz")
 
 
 def _head_insert_at(html):
     """Index just after the page's <head ...> (or after the doctype when there is no head), else 0.
 
     One forward scan: comments and raw-text elements are skipped as text, and an unclosed one ends the search,
-    so an agent's page cannot make this slow the way backtracking regexes were."""
-    lower, after_doctype, i = html.lower(), 0, 0
+    so the time stays linear in the page size whatever an agent writes."""
+    # ASCII-only lowering keeps every offset valid for html; str.lower() can change the length ("İ").
+    lower, after_doctype, i = html.translate(_ASCII_LOWER), 0, 0
     while True:
         i = lower.find("<", i)
         if i < 0:
@@ -1552,10 +1594,11 @@ def _head_insert_at(html):
         if tag == "!doctype":
             after_doctype = end + 1
         elif tag in RAW_TEXT_ELEMENTS:
-            close = lower.find("</" + tag, end)
-            if close < 0:
+            # The closing tag must end there: "</scripts" inside a script is still script text.
+            close = re.compile(r"</%s[\s/>]" % tag).search(lower, end)
+            if close is None:
                 return after_doctype
-            end = close
+            end = close.start()
         i = end + 1
 
 
@@ -1644,9 +1687,8 @@ class _ChromePipe:
 def _capture_views(chrome, url):
     """{"desktop-top.png": bytes, ...} for every SCREENSHOT_VIEWS size, at the top and scrolled to the end."""
     shots = {}
-    profile = _scratch_dir("chrome-")
-    try:
-        browser = _ChromePipe(chrome, profile, time.time() + 90)
+    with _scratch("chrome-") as profile:
+        browser = _ChromePipe(chrome, str(profile), time.time() + 90)
         try:
             target = browser.call("Target.createTarget", url="about:blank")["targetId"]
             browser.session = browser.call("Target.attachToTarget", targetId=target, flatten=True)["sessionId"]
@@ -1664,8 +1706,6 @@ def _capture_views(chrome, url):
                     shots["%s-%s.png" % (view.name, where)] = base64.b64decode(data)
         finally:
             browser.close()
-    finally:
-        shutil.rmtree(profile, ignore_errors=True)
     return shots
 
 
@@ -1674,7 +1714,7 @@ def _unit_screenshots(path, unit):
 
     Real viewport heights matter: in a tall window 100vh fills the page and a sidebar that stops after
     one screen looks fine."""
-    unit_root = _unit_path(path, unit["id"])
+    unit_root = path / unit_dir(unit["id"])
     out_dir = unit_root / "screenshots"
     _remove(out_dir)
     chrome = _chrome_binary()
