@@ -943,6 +943,20 @@ class UiWorkbenchTest(unittest.TestCase):
             self.assertNotIn(("generate", "layout"), calls)
             self.assertEqual(self.read(root, "src/ui/units/component/metadata.json")["outputHash"], current_output_hash(workspace, "component"))
 
+    def test_re_review_moves_nothing_when_a_metadata_path_cannot_be_read(self):
+        with tempfile.TemporaryDirectory() as root:
+            workspace = self.phase_four(root)
+            self.run_phase_four(workspace)
+            metadata = workspace / workbench.unit_dir("component") / "metadata.json"
+            metadata.unlink()
+            metadata.mkdir()
+            (metadata / "keep").write_text("x", encoding="utf-8")
+            write_output(workspace, "layout", "<main>fixed by hand</main>\n")
+            with self.assertRaises(OSError):
+                workbench.reopen_unit_review(workspace, "layout")
+            for unit in workbench.UI_UNIT_DEPENDENCIES:
+                self.assertEqual(self.unit_status(workspace, unit)["status"], "approved")
+
     def test_re_review_waits_for_an_upstream_the_reviewer_rejected(self):
         with tempfile.TemporaryDirectory() as root:
             workspace = self.phase_four(root)
