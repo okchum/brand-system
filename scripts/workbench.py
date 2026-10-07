@@ -2036,7 +2036,8 @@ class Handler(BaseHTTPRequestHandler):
             if parsed.path == "/api/check":
                 path = self.workspace_path(q.get("path", [""])[0])
                 p = _run_checker(path, _read_json(path / "project/status.json")["phase"])
-                return self.send_json({"ok": p.returncode == 0, "output": p.stdout + p.stderr})
+                # A job started elsewhere (another tab) makes this result stale; the page follows the job instead.
+                return self.send_json({"ok": p.returncode == 0, "output": p.stdout + p.stderr, "activeJob": _active_job(path)})
             self.send_json({"error": "not found"}, 404)
         except Exception as exc:
             self.send_error_json(exc)

@@ -1966,6 +1966,18 @@ class UiWorkbenchHttpTest(unittest.TestCase):
         self.assertEqual(code, 400)
         self.assertIn("Phase 4", payload["error"])
 
+    def test_check_reports_a_job_running_in_the_workspace(self):
+        passed = subprocess.CompletedProcess([], 0, "0 finding(s)", "")
+        with mock.patch.object(workbench, "_run_checker", return_value=passed):
+            code, payload = self.call("/api/check?path=" + str(self.workspace))
+            self.assertEqual((code, payload["activeJob"]), (200, None))
+            job_id = workbench._create_job(self.workspace, "elsewhere")
+            try:
+                code, payload = self.call("/api/check?path=" + str(self.workspace))
+            finally:
+                workbench._finish_job(job_id, "done")
+        self.assertEqual(payload["activeJob"]["id"], job_id)
+
     def test_phase_four_generate_without_a_unit_starts_the_whole_run(self):
         with mock.patch.object(workbench, "start_phase_four_run", return_value="run-1") as run, \
                 mock.patch.object(workbench, "start_generation", return_value="phase-1") as phase:
