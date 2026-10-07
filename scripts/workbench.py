@@ -1625,8 +1625,7 @@ def start_phase_four_run(path):
                     JOBS[job_id]["runUnit"] = unit_id
                 if state == APPROVED and reopen_unit_review(path, unit_id):
                     _job_log(job_id, "自动推进：unit %s 通过后输出被改动，重新审查（不重新生成）。" % unit_id)
-                    state = IN_REVIEW
-                if state != IN_REVIEW:
+                elif state != IN_REVIEW:
                     count = generations.get(unit_id, 0)
                     if count == MAX_UNIT_GENERATIONS:
                         review = check_workspace.latest_unit_reviews(_read_json(path / "project/approvals.json", [])).get(unit_id) or {}
