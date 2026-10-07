@@ -93,17 +93,25 @@ def check_files(ws, phase, problems):
                 p for p, files in REQUIRED.items() if rel in files
             )
             problems.append("missing %s (%s)" % (rel, marker))
+    problems.extend(message for _, message in broken_files(ws))
+
+
+def broken_files(ws):
+    """(relative path, finding) for every dangling, unreadable or empty file in the workspace."""
+    found = []
     for dirpath, dirnames, filenames in os.walk(ws):
         dirnames[:] = [d for d in dirnames if d not in SKIP_DIRS]
         for name in filenames:
             f = Path(dirpath) / name
+            rel = f.relative_to(ws)
             try:
                 empty = f.stat().st_size == 0
             except OSError:
-                problems.append("dangling or unreadable file %s" % f.relative_to(ws))
+                found.append((rel, "dangling or unreadable file %s" % rel))
                 continue
             if empty and name not in EMPTY_OK:
-                problems.append("empty file %s" % f.relative_to(ws))
+                found.append((rel, "empty file %s" % rel))
+    return found
 
 
 def present(record, key):
@@ -434,15 +442,19 @@ def review_current(ws, review, manifest, unit):
     return review_on_output(ws, review, manifest, unit) and review.get("conclusion") == APPROVED
 
 
+def unit_passed(ws, manifest, status_by_id, latest_reviews, unit):
+    """The unit is approved and its latest review still vouches for the output on disk."""
+    return status_by_id.get(unit.get("id"), NOT_STARTED) == APPROVED and review_current(
+        ws, latest_reviews.get(unit.get("id")), manifest, unit
+    )
+
+
 def unsatisfied_dependencies(ws, manifest, status_by_id, latest_reviews, unit):
     units = {item.get("id"): item for item in manifest.get("units", []) if isinstance(item, dict)}
-    missing = []
-    for dep in unit.get("dependsOn", []) if isinstance(unit, dict) else []:
-        if status_by_id.get(dep, NOT_STARTED) != APPROVED or dep not in units or not review_current(
-            ws, latest_reviews.get(dep), manifest, units[dep]
-        ):
-            missing.append(dep)
-    return missing
+    return [
+        dep for dep in (unit.get("dependsOn", []) if isinstance(unit, dict) else [])
+        if dep not in units or not unit_passed(ws, manifest, status_by_id, latest_reviews, units[dep])
+    ]
 
 
 def latest_gate_states(records, problems):

@@ -667,6 +667,237 @@ class UiWorkbenchTest(unittest.TestCase):
             self.assertEqual(record["outputHash"], current_output_hash(workspace, "page-map"))
             self.assertIn("Layout tokens used correctly", record["evidence"])
 
+    def fake_phase_four(self, verdicts=None, fail_unit=None, fail_phase=False, on_generate=None):
+        """Stand-in for every agent the Phase 4 run starts. verdicts maps a unit to the conclusions its reviews
+        return in turn (approved once the list runs out); the phase job writes every Phase 4 file."""
+        calls, prompts, verdicts = [], {}, {key: list(value) for key, value in (verdicts or {}).items()}
+        self.prompts = prompts
+
+        def run(cmd, cwd, timeout, output_path=None):
+            match = re.search(r"UI unit「([a-z-]+)」", cmd[-1])
+            if match is None:
+                calls.append(("phase", None))
+                if fail_phase:
+                    raise RuntimeError("codex 退出码 1")
+                for relative in workbench._phase_requirements(4):
+                    target = Path(cwd) / relative
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    target.write_text("{}" if relative.endswith(".json") else "assets", encoding="utf-8")
+                status_path = Path(cwd) / "project/status.json"
+                status = json.loads(status_path.read_text(encoding="utf-8"))
+                status["state"] = "in-review"
+                status_path.write_text(json.dumps(status), encoding="utf-8")
+                return 0
+            unit_id = match.group(1)
+            if "read-only" in cmd:
+                calls.append(("review", unit_id))
+                queue = verdicts.get(unit_id) or []
+                conclusion = queue.pop(0) if queue else "approved"
+                if conclusion == "unreadable":
+                    Path(cmd[cmd.index("-o") + 1]).write_text("not json", encoding="utf-8")
+                    return 0
+                findings = [] if conclusion == "approved" else [{"severity": "P1", "location": "nav", "problem": "focus lost"}]
+                Path(cmd[cmd.index("-o") + 1]).write_text(json.dumps(
+                    {"conclusion": conclusion, "summary": "%s round" % conclusion, "findings": findings}), encoding="utf-8")
+                return 0
+            calls.append(("generate", unit_id))
+            prompts.setdefault(unit_id, []).append(cmd[-1])
+            if on_generate:
+                on_generate(unit_id)
+            if unit_id == fail_unit:
+                raise RuntimeError("codex 退出码 1")
+            write_output(cwd, unit_id, "<main>%s</main>\n" % unit_id)
+            return 0
+        return run, calls
+
+    def run_phase_four(self, workspace, check_passes=True, **fake):
+        run, calls = self.fake_phase_four(**fake)
+        check = subprocess.CompletedProcess([], 0, "0 finding(s)", "") if check_passes else \
+            subprocess.CompletedProcess([], 1, "FAIL docs/licensing.md is empty", "")
+        with mock.patch.object(workbench, "_run_agent", side_effect=run), \
+                mock.patch.object(workbench.subprocess, "run", return_value=check):
+            job = wait_for(workbench.start_phase_four_run(workspace))
+        return job, calls
+
+    def test_phase_four_run_builds_every_unit_in_order_then_the_assets(self):
+        with tempfile.TemporaryDirectory() as root:
+            workspace = self.phase_four(root)
+            job, calls = self.run_phase_four(workspace)
+            self.assertEqual(job["status"], "done", job)
+            units = list(workbench.UI_UNIT_DEPENDENCIES)
+            self.assertEqual(calls, [step for unit in units for step in (("generate", unit), ("review", unit))] + [("phase", None)])
+            for unit in units:
+                self.assertEqual(self.unit_status(workspace, unit)["status"], "approved")
+            self.assertTrue(job["check"]["passed"])
+            self.assertTrue((workspace / "review/04-assets.html").is_file())
+            # G4 stays the user's: the run never records it.
+            self.assertNotIn("G4", [item.get("gate") for item in self.read(root, "project/approvals.json")])
+
+    def test_phase_four_run_regenerates_with_feedback_until_approved(self):
+        with tempfile.TemporaryDirectory() as root:
+            workspace = self.phase_four(root)
+            rounds = workbench.MAX_UNIT_GENERATIONS - 1
+            job, calls = self.run_phase_four(workspace, verdicts={"layout": ["changes-requested"] * rounds})
+            self.assertEqual(job["status"], "done", job)
+            self.assertEqual(calls.count(("generate", "layout")), rounds + 1)
+            # Each regeneration is given the findings that sent the unit back.
+            self.assertNotIn("focus lost", self.prompts["layout"][0])
+            self.assertIn("focus lost", self.prompts["layout"][1])
+            self.assertEqual(self.unit_status(workspace, "platform-adaptation")["status"], "approved")
+
+    def test_phase_four_run_stops_at_the_generation_limit(self):
+        with tempfile.TemporaryDirectory() as root:
+            workspace = self.phase_four(root)
+            limit = workbench.MAX_UNIT_GENERATIONS
+            job, calls = self.run_phase_four(workspace, verdicts={"layout": ["changes-requested"] * limit})
+            self.assertEqual(job["status"], "error")
+            self.assertIn("layout", job["error"])
+            self.assertIn("changes-requested round", job["error"])
+            self.assertEqual(calls.count(("generate", "layout")), limit)
+            self.assertEqual(self.unit_status(workspace, "layout")["status"], "changes-requested")
+            self.assertEqual(self.unit_status(workspace, "reuse-analysis")["status"], "not-started")
+            self.assertNotIn(("phase", None), calls)
+            self.assertIsNone(workbench._running_job(workspace))
+
+    def test_phase_four_run_stops_at_a_unit_whose_generation_fails(self):
+        with tempfile.TemporaryDirectory() as root:
+            workspace = self.phase_four(root)
+            job, calls = self.run_phase_four(workspace, fail_unit="layout")
+            self.assertEqual(job["status"], "error")
+            self.assertIn("codex 退出码 1", job["error"])
+            self.assertEqual(calls[-1], ("generate", "layout"))
+            self.assertIn("生成失败", self.unit_status(workspace, "layout")["note"])
+            self.assertIsNone(workbench._running_job(workspace))
+
+    def test_phase_four_run_resumes_without_redoing_finished_work(self):
+        with tempfile.TemporaryDirectory() as root:
+            workspace = self.phase_four(root)
+            self.run_phase_four(workspace, verdicts={"page": ["changes-requested"] * workbench.MAX_UNIT_GENERATIONS})
+            # A unit left waiting for its review is only reviewed again.
+            write_output(workspace, "page")
+            workbench.begin_unit_generation(workspace, "page")
+            workbench.mark_unit_in_review(workspace, "page")
+            job, calls = self.run_phase_four(workspace)
+            self.assertEqual(job["status"], "done", job)
+            self.assertEqual(calls, [("review", "page"), ("generate", "platform-adaptation"), ("review", "platform-adaptation"), ("phase", None)])
+            # Phase 4 assets already generated are not generated again.
+            job, calls = self.run_phase_four(workspace)
+            self.assertEqual(job["status"], "done", job)
+            self.assertEqual(calls, [])
+
+    def test_phase_four_run_regenerates_assets_after_g4_is_withdrawn(self):
+        for phase in (4, 5):
+            with self.subTest(withdrawn_at_phase=phase), tempfile.TemporaryDirectory() as root:
+                workspace = self.phase_four(root)
+                self.run_phase_four(workspace)
+                workbench.record_gate(workspace, "G4")
+                self.at_phase(workspace, phase)
+                workbench.record_gate(workspace, "G4", status="changes-requested")
+                self.assertEqual(self.read(root, "project/status.json")["phase"], 4)
+                job, calls = self.run_phase_four(workspace)
+                self.assertEqual(job["status"], "done", job)
+                self.assertEqual(calls, [("phase", None)])
+
+    def test_withdrawing_a_gate_in_its_own_phase_returns_that_phase_to_draft(self):
+        with tempfile.TemporaryDirectory() as root:
+            workspace = self.at_phase(self.init(root), 1)
+            (workspace / "project/approvals.json").write_text(json.dumps([G1_APPROVED]), encoding="utf-8")
+            status_path = workspace / "project/status.json"
+            status = json.loads(status_path.read_text(encoding="utf-8"))
+            status["state"] = "in-review"
+            status_path.write_text(json.dumps(status), encoding="utf-8")
+            workbench.record_gate(workspace, "G1", status="changes-requested")
+            self.assertEqual({key: self.read(root, "project/status.json")[key] for key in ("phase", "state")},
+                             {"phase": 1, "state": "draft"})
+
+    def test_phase_four_run_regenerates_only_assets_the_checker_rejects(self):
+        with tempfile.TemporaryDirectory() as root:
+            workspace = self.phase_four(root)
+            job, _ = self.run_phase_four(workspace, check_passes=False)
+            self.assertEqual(job["status"], "done", job)
+            self.assertFalse(job["check"]["passed"])
+            # A finding the asset job cannot fix does not regenerate the assets on every resume.
+            job, calls = self.run_phase_four(workspace, check_passes=False)
+            self.assertEqual(job["status"], "done", job)
+            self.assertEqual(calls, [])
+            # File findings the asset job may fix do: a missing deliverable, or any empty file it can write.
+            for relative, broken in (("docs/licensing.md", None), ("docs/licensing.md", ""), ("exports/icon-512.png", "")):
+                with self.subTest(relative=relative, broken=broken):
+                    target = workspace / relative
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    target.unlink(missing_ok=True) if broken is None else target.write_text(broken, encoding="utf-8")
+                    job, calls = self.run_phase_four(workspace)
+                    self.assertEqual(job["status"], "done", job)
+                    self.assertEqual(calls, [("phase", None)])
+                    target.write_text("x", encoding="utf-8")
+                    job, calls = self.run_phase_four(workspace)
+                    self.assertEqual(calls, [])
+            # So does a project/status.json the asset job left invalid.
+            status_path = workspace / "project/status.json"
+            status = json.loads(status_path.read_text(encoding="utf-8"))
+            status.pop("completed", None)
+            status_path.write_text(json.dumps(status), encoding="utf-8")
+            job, calls = self.run_phase_four(workspace)
+            self.assertEqual(calls, [("phase", None)])
+            status["completed"] = []
+            status_path.write_text(json.dumps(status), encoding="utf-8")
+            # An empty file inside a unit is not the asset job's: its changes there are rolled back.
+            (workspace / workbench.unit_dir("page") / "extra.css").write_text("", encoding="utf-8")
+            job, calls = self.run_phase_four(workspace)
+            self.assertEqual(job["status"], "done", job)
+            self.assertEqual(calls, [])
+
+    def test_phase_four_run_stops_when_the_assets_fail(self):
+        with tempfile.TemporaryDirectory() as root:
+            workspace = self.phase_four(root)
+            job, calls = self.run_phase_four(workspace, fail_phase=True)
+            self.assertEqual(job["status"], "error")
+            self.assertIn("codex 退出码 1", job["error"])
+            self.assertEqual(calls[-1], ("phase", None))
+            self.assertEqual(self.unit_status(workspace, "platform-adaptation")["status"], "approved")
+            self.assertIsNone(workbench._running_job(workspace))
+
+    def test_phase_four_run_stops_when_a_review_gives_no_verdict(self):
+        with tempfile.TemporaryDirectory() as root:
+            workspace = self.phase_four(root)
+            job, calls = self.run_phase_four(workspace, verdicts={"layout": ["unreadable"]})
+            self.assertEqual(job["status"], "error")
+            self.assertEqual(calls[-1], ("review", "layout"))
+            self.assertEqual(self.unit_status(workspace, "layout")["status"], "in-review")
+            self.assertIn("自动审查失败", self.unit_status(workspace, "layout")["note"])
+
+    def test_phase_four_run_refuses_a_unit_ordered_before_its_dependency(self):
+        with tempfile.TemporaryDirectory() as root:
+            workspace = self.phase_four(root)
+            manifest_path = workspace / "src/ui/ir/manifest.json"
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            manifest["units"][0]["dependsOn"] = ["layout"]
+            manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+            workbench.sync_manifest_hash(workspace)
+            job, calls = self.run_phase_four(workspace)
+            self.assertEqual(job["status"], "error")
+            self.assertIn("page-map", job["error"])
+            self.assertEqual(calls, [])
+
+    def test_phase_four_run_marks_the_unit_it_is_working_on(self):
+        with tempfile.TemporaryDirectory() as root:
+            workspace = self.phase_four(root)
+            seen = {}
+
+            def look(unit_id):
+                if unit_id == "layout":
+                    seen.update({unit["id"]: unit["running"] for unit in workbench.unit_overview(workspace)["units"]})
+            job, _ = self.run_phase_four(workspace, on_generate=look)
+            self.assertEqual(job["status"], "done", job)
+            self.assertEqual([unit for unit, running in seen.items() if running], ["layout"])
+
+    def test_phase_four_run_needs_the_unit_preconditions(self):
+        with tempfile.TemporaryDirectory() as root:
+            workspace = self.at_phase(self.init(root), 4)
+            with self.assertRaisesRegex(ValueError, "G1"):
+                workbench.start_phase_four_run(workspace)
+            self.assertIsNone(workbench._running_job(workspace))
+
     def test_agent_settings_are_validated_and_stored_at_init(self):
         with tempfile.TemporaryDirectory() as root:
             agents = {"generation": {"engine": "codex", "model": "gpt-6.1-sol", "reasoningEffort": "high"},
@@ -1149,6 +1380,9 @@ class UiWorkbenchTest(unittest.TestCase):
             self.assertTrue(units["layout"]["canGenerate"])
             self.assertEqual(units["page-map"]["review"]["conclusion"], "approved")
             self.assertEqual(units["page-map"]["review"]["summary"], "Every page has a clear job")
+            # An approved unit whose output changed after its review is the current unit again.
+            write_output(workspace, "page-map", "<main>edited by hand</main>\n")
+            self.assertEqual(workbench.unit_overview(workspace)["currentUnit"], "page-map")
 
 
 class UiWorkbenchRobustnessTest(unittest.TestCase):
@@ -1337,6 +1571,7 @@ class WorkbenchPageTest(unittest.TestCase):
         for value in check_workspace.STACK_PROFILES + check_workspace.UI_PLATFORMS:
             self.assertNotIn('<option value="%s"' % value, self.html)
         # The unit panel sits in the branch of the phase that owns UI units.
+        self.assertIn('"maxUnitGenerations": %d' % workbench.MAX_UNIT_GENERATIONS, page)
         before_panel = self.html[:self.html.index('id="unitPanel"')]
         self.assertEqual(re.findall(r"i===(\d)\?", before_panel)[-1], str(workbench.UI_UNIT_PHASE))
 
@@ -1633,6 +1868,16 @@ class UiWorkbenchHttpTest(unittest.TestCase):
         code, payload = self.call("/api/review", {"path": str(self.workspace), "phase": 0, "unitId": "page-map"})
         self.assertEqual(code, 400)
         self.assertIn("Phase 4", payload["error"])
+
+    def test_phase_four_generate_without_a_unit_starts_the_whole_run(self):
+        with mock.patch.object(workbench, "start_phase_four_run", return_value="run-1") as run, \
+                mock.patch.object(workbench, "start_generation", return_value="phase-1") as phase:
+            code, payload = self.call("/api/generate", {"path": str(self.workspace), "phase": 4})
+            self.assertEqual((code, payload), (200, {"job": "run-1"}))
+            code, payload = self.call("/api/generate", {"path": str(self.workspace), "phase": 3})
+            self.assertEqual((code, payload), (200, {"job": "phase-1"}))
+        run.assert_called_once_with(self.workspace)
+        phase.assert_called_once_with(self.workspace, 3)
 
     def test_unit_review_endpoint_requires_output_hash(self):
         write_output(self.workspace, "page-map")

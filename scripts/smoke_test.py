@@ -38,6 +38,8 @@ def approval(gate, status="approved"):
 
 def stand_in_codex(cmd, cwd, timeout):
     """Replaces only the codex process: generation writes the unit output, review returns a verdict."""
+    if "UI unit「" not in cmd[-1]:
+        raise RuntimeError("smoke stand-in only answers unit prompts; the Phase 4 run should have kept the prepared assets")
     if "read-only" in cmd:
         verdict = {"conclusion": "approved", "summary": "smoke review", "findings": []}
         Path(cmd[cmd.index("-o") + 1]).write_text(json.dumps(verdict), encoding="utf-8")
@@ -47,21 +49,19 @@ def stand_in_codex(cmd, cwd, timeout):
     return 0
 
 
-def review_units_in_order(workspace):
-    """Drive every unit through the workbench's real job path (claim, snapshot, generate, review, record)."""
+def run_phase_four(workspace):
+    """Drive every unit through the Phase 4 run the page's main button starts (claim, snapshot, generate, review, record)."""
     workbench._run_agent = stand_in_codex
     workbench._chrome_binary = lambda: None  # no real browser in the smoke run
     # Next to the workspace, inside the smoke run's own temporary directory, so the user's cache stays untouched.
     workbench.SCRATCH_ROOT = workspace.parent / "scratch"
-    units = json.loads((workspace / "src/ui/ir/manifest.json").read_text(encoding="utf-8"))["units"]
-    for unit in units:
-        job_id = workbench.start_unit_job(workspace, 4, unit["id"])
-        deadline = time.time() + 30
-        while workbench.JOBS[job_id]["status"] == "running" and time.time() < deadline:
-            time.sleep(0.05)
-        job = workbench.JOBS[job_id]
-        if job["status"] != "done":
-            raise RuntimeError("unit %s job ended %s: %s" % (unit["id"], job["status"], job["error"]))
+    job_id = workbench.start_phase_four_run(workspace)
+    deadline = time.time() + 60
+    while workbench.JOBS[job_id]["status"] == "running" and time.time() < deadline:
+        time.sleep(0.05)
+    job = workbench.JOBS[job_id]
+    if job["status"] != "done":
+        raise RuntimeError("Phase 4 run ended %s: %s" % (job["status"], job["error"]))
 
 
 def check_cli(workspace, phase, expected, release=False, needle=""):
@@ -125,7 +125,7 @@ def run():
                 write_json(approvals_path, approvals)
                 if phase == 4:
                     # Units are generated only after G3, as the workbench enforces.
-                    review_units_in_order(workspace)
+                    run_phase_four(workspace)
                     approvals = json.loads(approvals_path.read_text(encoding="utf-8"))
                 check_cli(workspace, phase, 0)
                 approvals.append(approval(gate, status="changes-requested"))

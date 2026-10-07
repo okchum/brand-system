@@ -68,6 +68,30 @@
 | 只重新审查（`POST /api/review`） | `in-review` | 当前阶段为 Phase 4；没有正在运行的任务 | 重新运行自动审查 |
 | 外部 agent 记录审查（`POST /api/approve`，`kind=unit-review`） | `in-review` | reviewer 为有名字的 subagent；`fileScope` 只引用该 unit 的输出文件；`outputHash` 等于输出文件当前内容 | 追加 unit-review；unit 变为 `approved` 或 `changes-requested` |
 
+#### Phase 4 自动推进
+
+Phase 4 的主按钮（或 `POST /api/generate` 只带 `phase: 4`、不带 `unitId`）启动一次自动推进：一个任务从头到尾占住工作区，按下表把所有 unit 和平台资产做完，停在 G4 前。逐个 unit 的按钮和接口保留，用来单独重做某个 unit。
+
+自动推进不需要中途确认，因为 unit 的通过与否本来就由独立审查进程决定，用户在这一阶段真正要做的判断只有 G4。G4 仍由用户在资产审阅页确认，自动推进从不记录它。
+
+“已通过”的 unit：状态为 `approved`，且最新一条 unit-review 结论为 `approved`、仍绑定当前 manifest 与当前输出（与依赖满足用同一个判断）。
+
+| 情形 | 动作 |
+|---|---|
+| 启动 | 前提与生成单个 unit 相同：当前阶段为 Phase 4；G1–G3 最新记录为 approved；`tokens/src` 里已有 token 文件；没有正在运行的任务 |
+| 选下一个 unit | 按 manifest 顺序取第一个未通过的 unit；它的依赖必须已满足，否则停下并说明缺哪些依赖 |
+| 该 unit 处于 `in-review` | 只运行审查，不重新生成 |
+| 其他状态（`not-started`、`in-progress`、`changes-requested`，或 `approved` 但审查已不对应当前输出） | 按单个 unit 的规则生成并审查；重新生成时 prompt 带上最近的审查意见 |
+| 审查结论 `approved` | 进入下一个 unit |
+| 审查结论 `changes-requested`，本次推进中该 unit 生成未满 3 次 | 带着审查意见重新生成并审查 |
+| 审查结论 `changes-requested`，本次推进中该 unit 已生成 3 次 | 停下；unit 保持 `changes-requested`，任务报告该 unit 和最后一次审查的摘要 |
+| 生成失败、超时、改动 unit 目录以外的文件，或审查失败 | 停下；unit 的状态与 `note` 按单个 unit 的规则记录 |
+| 所有 unit 已通过 | 若 `project/status.json` 的 `state` 不是 `in-review` 或该文件未通过检查，或 Phase 4 必需文件有缺失，或 checker 在整阶段生成任务可以改动的文件里发现空文件、失效链接，按整阶段生成任务的规则生成平台资产；否则跳过并在日志说明。检查里的其他问题（更早阶段缺失的文件、brief、manifest、审批，以及 `project/approvals.json`、`src/ui/ir/`、`src/ui/units/` 里的文件，整阶段任务对它们的改动会被恢复）重新生成资产也修不好，所以不触发重新生成 |
+| 平台资产生成失败或改动受保护文件 | 停下，按整阶段生成任务的规则恢复和报告 |
+| 平台资产完成或跳过 | 运行 Phase 4 检查，结果与任务一起返回；检查通过时页面显示资产审阅页和 G4 确认按钮，未通过时显示检查输出，按钮回到“继续自动生成 Phase 4”；任务结束和重新打开页面走同一个判断：状态为 `in-review` 且所有 unit 已通过时运行检查，通过才显示 G4，否则显示检查输出和“继续自动生成 Phase 4”；状态不是 `in-review` 时显示自动生成按钮。在本页面停下的任务（出错或达到重做上限）不显示 G4，只显示原因和“继续自动生成 Phase 4” |
+
+停下后再次启动会从第一个未通过的 unit 接着做，已通过的 unit 和已生成的平台资产不重做；3 次的上限按每次启动重新计。先做 unit 再做平台资产，与阶段说明“按工作单元生成产品界面，再生成平台资产”的顺序一致。
+
 #### 生成与审查用哪个 AI
 
 `config/ui.json` 的可选字段 `agents` 分别设置 UI 工作单元的生成（`generation`）与审查（`review`），每项可填：

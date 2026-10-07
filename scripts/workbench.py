@@ -52,6 +52,7 @@ def page_html():
     contract = {
         "stacks": check_workspace.STACK_PROFILES, "platforms": check_workspace.UI_PLATFORMS,
         "defaultEngine": check_workspace.DEFAULT_ENGINE, "recordableGates": list(GATE_SPECS),
+        "maxUnitGenerations": MAX_UNIT_GENERATIONS,
     }
     return HTML.replace("__AGENT_EFFORTS__", json.dumps({engine: list(levels) for engine, levels in check_workspace.AGENT_EFFORTS.items()})).replace("__UI_CONTRACT__", json.dumps(contract))
 
@@ -528,7 +529,7 @@ def unit_overview(path):
             "kind": unit.get("kind"),
             "status": state,
             # in-progress also survives a failed run; only this says a job is generating the unit now.
-            "running": bool(active and active.get("unitId") == unit["id"]),
+            "running": bool(active and unit["id"] in (active.get("unitId"), active.get("runUnit"))),
             "note": notes.get(unit["id"]) or "",
             "dependsOn": unit.get("dependsOn", []),
             "blockedBy": blocked_by,
@@ -545,7 +546,9 @@ def unit_overview(path):
             "canGenerate": not phase_blocker and not blocked_by and not busy,
             "canReview": not phase_blocker and state == IN_REVIEW and not busy,
         })
-    current = next((item["id"] for item in overview if item["status"] != APPROVED), None)
+    # The same "passed" test the Phase 4 run uses, so the page names the unit the run would take next.
+    current = next((unit["id"] for unit in manifest["units"]
+                    if not check_workspace.unit_passed(path, manifest, states, reviews, unit)), None)
     return {"units": overview, "currentUnit": current, "phaseBlocker": phase_blocker}
 
 
@@ -771,7 +774,7 @@ def _active_job(path):
     with JOBS_LOCK:
         for job_id, job in JOBS.items():
             if job.get("path") == str(path) and job["status"] == "running":
-                return {"id": job_id, "unitId": job.get("unitId")}
+                return {"id": job_id, "unitId": job.get("unitId"), "runUnit": job.get("runUnit")}
     return None
 
 
@@ -896,7 +899,7 @@ def _withdraw_gate(path, gate):
         # Gk approves phase k's deliverables; asking for changes means going back to regenerate them.
         status_path = path / "project/status.json"
         status = _read_json(status_path)
-        if int(status.get("phase", 0)) > int(gate[1:]):
+        if int(status.get("phase", 0)) >= int(gate[1:]):
             status.update(phase=int(gate[1:]), state="draft")
             _write_json(status_path, status)
         return withdrawn
@@ -961,62 +964,71 @@ def start_generation(path, phase):
         prompt = _phase_prompt(phase, choice)
         job_id = _create_job(path, prompt)
         try:
-            _require_real_roots(path, PHASE_PROTECTED_ROOTS)
-            before = _snapshot(path, PHASE_PROTECTED_ROOTS)
-            status_before = (path / "project/status.json").read_bytes()
+            before, status_before = _claim_phase(path)
         except Exception:
             with JOBS_LOCK:
                 JOBS.pop(job_id, None)
             raise
 
     def run():
-        cmd = ["codex", "exec", "--ephemeral", "--skip-git-repo-check", "-s", "workspace-write", "-C", str(path), "--json", prompt]
         try:
-            workspace_files = sorted(item for item in path.rglob("*") if item.is_file() and ".git" not in item.parts)
-            _job_log(job_id, "已读取工作区资料：%d 个文件" % len(workspace_files))
-            for item in (path / "brand.brief.json", path / "project/status.json", path / "project/source.json", path / "review/01-directions.html"):
-                if item.is_file():
-                    _job_log(job_id, "关键输入：" + str(item.relative_to(path)))
-            _job_log(job_id, "正在生成 Phase %d 交付物…" % phase, "生成 Phase %d" % phase)
-            run_error = None
-            try:
-                _run_agent(cmd, path, AGENT_TIMEOUT)
-            except Exception as exc:
-                run_error = exc
-            # A run that died may already have written that the phase is done; status is the progress authority,
-            # so it goes back first. Whatever happens there, the protected files below are still restored.
-            status_error = None
-            if run_error:
-                try:
-                    _write_atomic(path / "project/status.json", status_before)
-                except Exception as exc:
-                    status_error = exc
-            if status_error:
-                run_error = RuntimeError("%s；恢复 project/status.json 时出错：%s" % (run_error, status_error))
-            # Approvals, the UI manifest, unit outputs and unit progress belong to other flows.
-            try:
-                changed = _restore(path, PHASE_PROTECTED_ROOTS, before) + _restore_unit_progress(path, status_before)
-            except Exception as restore_error:
-                raise RuntimeError(
-                    ("%s；" % run_error if run_error else "")
-                    + "恢复审批、UI 清单或 unit 内容时出错，这些文件可能仍被改动：%s" % restore_error
-                )
-            if changed:
-                raise RuntimeError(
-                    ("%s；" % run_error if run_error else "")
-                    + "生成进程改动了审批、UI 清单或 unit 的内容，已恢复原样：" + "、".join(changed)
-                )
-            if run_error:
-                raise run_error
-            for item in sorted(item for item in path.rglob("*") if item.is_file() and ".git" not in item.parts):
-                if item not in workspace_files:
-                    _job_log(job_id, "已生成：" + str(item.relative_to(path)))
+            _generate_phase(job_id, path, phase, prompt, before, status_before)
             _record_phase_check(job_id, path, phase)
             _finish_job(job_id, "done")
         except Exception as exc:
             _finish_job(job_id, "error", str(exc))
     threading.Thread(target=run, daemon=True).start()
     return job_id
+
+
+def _claim_phase(path):
+    """Snapshot what a whole-phase job may not change; taken while the caller holds STATE_LOCK."""
+    _require_real_roots(path, PHASE_PROTECTED_ROOTS)
+    return _snapshot(path, PHASE_PROTECTED_ROOTS), (path / "project/status.json").read_bytes()
+
+
+def _generate_phase(job_id, path, phase, prompt, before, status_before):
+    """Run the whole-phase codex job, put back what it may not change, and raise when it failed."""
+    cmd = ["codex", "exec", "--ephemeral", "--skip-git-repo-check", "-s", "workspace-write", "-C", str(path), "--json", prompt]
+    workspace_files = sorted(item for item in path.rglob("*") if item.is_file() and ".git" not in item.parts)
+    _job_log(job_id, "已读取工作区资料：%d 个文件" % len(workspace_files))
+    for item in (path / "brand.brief.json", path / "project/status.json", path / "project/source.json", path / "review/01-directions.html"):
+        if item.is_file():
+            _job_log(job_id, "关键输入：" + str(item.relative_to(path)))
+    _job_log(job_id, "正在生成 Phase %d 交付物…" % phase, "生成 Phase %d" % phase)
+    run_error = None
+    try:
+        _run_agent(cmd, path, AGENT_TIMEOUT)
+    except Exception as exc:
+        run_error = exc
+    # A run that died may already have written that the phase is done; status is the progress authority,
+    # so it goes back first. Whatever happens there, the protected files below are still restored.
+    status_error = None
+    if run_error:
+        try:
+            _write_atomic(path / "project/status.json", status_before)
+        except Exception as exc:
+            status_error = exc
+    if status_error:
+        run_error = RuntimeError("%s；恢复 project/status.json 时出错：%s" % (run_error, status_error))
+    # Approvals, the UI manifest, unit outputs and unit progress belong to other flows.
+    try:
+        changed = _restore(path, PHASE_PROTECTED_ROOTS, before) + _restore_unit_progress(path, status_before)
+    except Exception as restore_error:
+        raise RuntimeError(
+            ("%s；" % run_error if run_error else "")
+            + "恢复审批、UI 清单或 unit 内容时出错，这些文件可能仍被改动：%s" % restore_error
+        )
+    if changed:
+        raise RuntimeError(
+            ("%s；" % run_error if run_error else "")
+            + "生成进程改动了审批、UI 清单或 unit 的内容，已恢复原样：" + "、".join(changed)
+        )
+    if run_error:
+        raise run_error
+    for item in sorted(item for item in path.rglob("*") if item.is_file() and ".git" not in item.parts):
+        if item not in workspace_files:
+            _job_log(job_id, "已生成：" + str(item.relative_to(path)))
 
 
 # Rounds of review findings carried into the next generation and re-review; older ones are dropped to keep
@@ -1418,61 +1430,169 @@ def _fail_unit_job(job_id, path, unit_id, exc):
     _finish_job(job_id, "error", error)
 
 
+def _require_unit_job(path, phase):
+    """Preconditions shared by every unit job; returns the generation setting and the G1 direction."""
+    _require_unit_phase(path, phase)
+    setting = _agent_setting(path, "generation")
+    _agent_setting(path, "review")  # an invalid review setting should stop the job before anything runs
+    return setting, g1_choice(_read_json(path / "project/approvals.json", []))
+
+
+def _unit_job_inputs(path, phase, unit_id):
+    """Check the preconditions of a unit generation and build its prompt; the caller holds STATE_LOCK."""
+    setting, choice = _require_unit_job(path, phase)
+    unit = _unit_record(_read_json(path / "src/ui/ir/manifest.json"), unit_id)
+    return setting, _unit_prompt(path, unit, choice)
+
+
+def _claim_unit(path, unit_id):
+    """Snapshot what the generation may not change, then claim the unit; the caller holds STATE_LOCK."""
+    # Snapshot first: if it fails nothing has changed yet. begin_unit_generation then rewrites
+    # status.json itself, and that write must count as "before" or the restore would undo it.
+    _require_real_roots(path, PROTECTED_ROOTS)
+    before = _protected_snapshot(path, unit_id)
+    begin_unit_generation(path, unit_id)
+    before["project/status.json"] = (path / "project/status.json").read_bytes()
+    return before
+
+
+def _generate_unit(job_id, path, unit_id, setting, prompt, before):
+    """Run the generating agent, put back anything it wrote outside its unit, and move the unit to in-review."""
+    # No --add-dir for either engine: extra dirs become writable, and the skill repo must stay out of reach.
+    cmd = _agent_command(path, setting, prompt, unit_id=unit_id)
+    _job_log(job_id, "正在生成 unit %s（%s）…" % (unit_id, setting["engine"]), "生成 unit %s" % unit_id)
+    run_error, claude_data = None, None
+    try:
+        claude_data = _run_agent_command(cmd, path, setting)
+    except Exception as exc:
+        run_error = exc
+    # Restore before reporting anything: a timeout or crash may already have written outside the unit.
+    try:
+        changed = _restore_outside_unit(path, unit_id, before)
+    except Exception as restore_error:
+        raise RuntimeError(
+            ("%s；" % run_error if run_error else "")
+            + "恢复 unit 目录以外的文件时出错，这些文件可能仍被改动：%s" % restore_error
+        )
+    if changed:
+        raise RuntimeError(
+            ("%s；" % run_error if run_error else "")
+            + "生成进程改动了 unit 目录以外的文件，已恢复原样：" + "、".join(changed)
+        )
+    if run_error:
+        raise run_error
+    mark_unit_in_review(path, unit_id, _agent_identity(setting, claude_data))
+    _job_log(job_id, "unit %s 已生成，进入审查。" % unit_id)
+
+
 def start_unit_job(path, phase, unit_id):
     """Generate one UI unit, then have an independent read-only agent process review it."""
     path = Path(path).expanduser().resolve()
     # Preconditions, claim and snapshot share STATE_LOCK: an approval or advance cannot land between them.
     with STATE_LOCK:
-        _require_unit_phase(path, phase)
-        setting = _agent_setting(path, "generation")
-        _agent_setting(path, "review")  # an invalid review setting should stop the job before anything runs
-        choice = g1_choice(_read_json(path / "project/approvals.json", []))
-        unit = _unit_record(_read_json(path / "src/ui/ir/manifest.json"), unit_id)
-        prompt = _unit_prompt(path, unit, choice)
+        setting, prompt = _unit_job_inputs(path, phase, unit_id)
         job_id = _create_job(path, prompt, unit_id)
         try:
-            # Snapshot first: if it fails nothing has changed yet. begin_unit_generation then rewrites
-            # status.json itself, and that write must count as "before" or the restore would undo it.
-            _require_real_roots(path, PROTECTED_ROOTS)
-            before = _protected_snapshot(path, unit_id)
-            begin_unit_generation(path, unit_id)
-            before["project/status.json"] = (path / "project/status.json").read_bytes()
+            before = _claim_unit(path, unit_id)
         except Exception:
             with JOBS_LOCK:
                 JOBS.pop(job_id, None)
             raise
 
     def run():
-        # No --add-dir for either engine: extra dirs become writable, and the skill repo must stay out of reach.
-        cmd = _agent_command(path, setting, prompt, unit_id=unit_id)
         try:
-            _job_log(job_id, "正在生成 unit %s（%s）…" % (unit_id, setting["engine"]), "生成 unit %s" % unit_id)
-            run_error, claude_data = None, None
-            try:
-                claude_data = _run_agent_command(cmd, path, setting)
-            except Exception as exc:
-                run_error = exc
-            # Restore before reporting anything: a timeout or crash may already have written outside the unit.
-            try:
-                changed = _restore_outside_unit(path, unit_id, before)
-            except Exception as restore_error:
-                raise RuntimeError(
-                    ("%s；" % run_error if run_error else "")
-                    + "恢复 unit 目录以外的文件时出错，这些文件可能仍被改动：%s" % restore_error
-                )
-            if changed:
-                raise RuntimeError(
-                    ("%s；" % run_error if run_error else "")
-                    + "生成进程改动了 unit 目录以外的文件，已恢复原样：" + "、".join(changed)
-                )
-            if run_error:
-                raise run_error
-            mark_unit_in_review(path, unit_id, _agent_identity(setting, claude_data))
-            _job_log(job_id, "unit %s 已生成，进入审查。" % unit_id)
+            _generate_unit(job_id, path, unit_id, setting, prompt, before)
             _review_unit(job_id, path, unit_id)
             _record_phase_check(job_id, path, phase)
             _finish_job(job_id, "done")
         except Exception as exc:
+            _fail_unit_job(job_id, path, unit_id, exc)
+    threading.Thread(target=run, daemon=True).start()
+    return job_id
+
+
+# Generations one unit gets within a single Phase 4 run; a unit the reviewer still sends back after that
+# many stops the run, so a generator and a reviewer that keep disagreeing cannot loop.
+MAX_UNIT_GENERATIONS = 3
+
+
+def _next_unit(path):
+    """The first unit in manifest order that has not passed, with its state; (None, None) when all have."""
+    manifest = _read_json(path / "src/ui/ir/manifest.json")
+    states = _unit_states(path)
+    reviews = check_workspace.latest_unit_reviews(_read_json(path / "project/approvals.json", []))
+    for unit in manifest.get("units", []):
+        if check_workspace.unit_passed(path, manifest, states, reviews, unit):
+            continue
+        missing = check_workspace.unsatisfied_dependencies(path, manifest, states, reviews, unit)
+        if missing:
+            raise ValueError("unit %s 的依赖未通过：%s" % (unit["id"], ", ".join(missing)))
+        return unit["id"], states.get(unit["id"], NOT_STARTED)
+    return None, None
+
+
+def _phase_four_assets_needed(path):
+    """Assets are kept only when the phase job finished them: state in-review with the rest of project/status.json
+    valid, every Phase 4 required file there, and no empty or dangling file the phase job may change. The checker's
+    other findings (earlier phases' missing files, brief, manifest, gates, files under PHASE_PROTECTED_ROOTS,
+    whose changes the job has rolled back) are not the asset job's to fix, so they do not send every resumed
+    run through another full asset generation."""
+    status_problems = []
+    status = check_workspace.check_status(path, UI_UNIT_PHASE, status_problems) or {}
+    missing = [rel for rel in check_workspace.REQUIRED[UI_UNIT_PHASE] if not (path / rel).is_file()]
+    fixable = [rel for rel, _ in check_workspace.broken_files(path)
+               if not any(rel == Path(root) or Path(root) in rel.parents for root in PHASE_PROTECTED_ROOTS)]
+    return status.get("state") != "in-review" or bool(status_problems or missing or fixable)
+
+
+def start_phase_four_run(path):
+    """Take Phase 4 to G4 in one job: every unit generated and reviewed in order, then the platform assets."""
+    path = Path(path).expanduser().resolve()
+    with STATE_LOCK:
+        _require_unit_job(path, UI_UNIT_PHASE)
+        job_id = _create_job(path, "Phase 4 自动推进")
+
+    def run():
+        unit_id, generations = None, {}
+        try:
+            while True:
+                unit_id = None  # so a _next_unit failure is not recorded against the unit handled last
+                with STATE_LOCK:
+                    unit_id, state = _next_unit(path)
+                if unit_id is None:
+                    break
+                with JOBS_LOCK:
+                    JOBS[job_id]["runUnit"] = unit_id
+                if state != IN_REVIEW:
+                    count = generations.get(unit_id, 0)
+                    if count == MAX_UNIT_GENERATIONS:
+                        review = check_workspace.latest_unit_reviews(_read_json(path / "project/approvals.json", [])).get(unit_id) or {}
+                        raise RuntimeError("unit %s 已生成 %d 次，审查仍要求修改，自动推进已停下：%s" % (
+                            unit_id, count, review.get("summary") or "见审查记录"))
+                    generations[unit_id] = count + 1
+                    _job_log(job_id, "自动推进：unit %s 第 %d 次生成。" % (unit_id, count + 1))
+                    with STATE_LOCK:
+                        setting, prompt = _unit_job_inputs(path, UI_UNIT_PHASE, unit_id)
+                        before = _claim_unit(path, unit_id)
+                    _generate_unit(job_id, path, unit_id, setting, prompt, before)
+                else:
+                    _job_log(job_id, "自动推进：unit %s 正在等待审查，只运行审查。" % unit_id)
+                _review_unit(job_id, path, unit_id)
+            with JOBS_LOCK:
+                JOBS[job_id]["runUnit"] = None
+            _job_log(job_id, "所有 UI unit 已通过审查。")
+            if _phase_four_assets_needed(path):
+                with STATE_LOCK:
+                    prompt = _phase_prompt(UI_UNIT_PHASE, g1_choice(_read_json(path / "project/approvals.json", [])))
+                    before, status_before = _claim_phase(path)
+                _generate_phase(job_id, path, UI_UNIT_PHASE, prompt, before, status_before)
+            else:
+                _job_log(job_id, "Phase 4 平台资产已生成，跳过。")
+            _record_phase_check(job_id, path, UI_UNIT_PHASE)
+            _finish_job(job_id, "done")
+        except Exception as exc:
+            with JOBS_LOCK:
+                JOBS[job_id]["runUnit"] = None
             _fail_unit_job(job_id, path, unit_id, exc)
     threading.Thread(target=run, daemon=True).start()
     return job_id
@@ -1885,6 +2005,8 @@ class Handler(BaseHTTPRequestHandler):
                 phase = int(body.get("phase", 1))
                 if unit_id:
                     return self.send_json({"job": start_unit_job(path, phase, unit_id), "unitId": unit_id})
+                if phase == UI_UNIT_PHASE:
+                    return self.send_json({"job": start_phase_four_run(path)})
                 return self.send_json({"job": start_generation(path, phase)})
             if endpoint == "/api/review":
                 unit_id = body.get("unitId", "")
