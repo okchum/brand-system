@@ -65,7 +65,8 @@
 | 生成失败、超时，或改动了该 unit 目录以外的文件 | `in-progress` | — | 越界改动的文件恢复原样；unit 保持 `in-progress`，`note` 写明原因 |
 | 自动审查完成 | `in-review` | 审查期间状态与输出内容都没有变化 | 追加 unit-review；unit 变为 `approved` 或 `changes-requested` |
 | 自动审查失败或结论无效 | `in-review` | — | 不追加记录；unit 保持 `in-review`，`note` 写明原因；可以只重新审查 |
-| 只重新审查（`POST /api/review`） | `in-review` | 当前阶段为 Phase 4；没有正在运行的任务 | 重新运行自动审查 |
+| 输出在审查之后被改动（自动推进或“只重新审查”时处理） | `approved` | 输出文件存在；最新审查绑定当前 manifest，但 `outputHash` 与当前输出不同。manifest 变了说明规格变了，不适用这一行，按生成规则重做 | unit 变为 `in-review`，`metadata.json` 改绑当前输出的 hash；直接或间接依赖它、处于 `approved` 的下游 unit 中，有输出的变为 `in-review`（它们的审查对照的是旧的上游产出），没有输出的变为 `changes-requested`。只重新审查而不重新生成，手工修改不会被覆盖 |
+| 只重新审查（`POST /api/review`） | `in-review`，或按上一行转为 `in-review` 的 `approved` unit | 当前阶段为 Phase 4；所有依赖满足；没有正在运行的任务 | 重新运行自动审查 |
 | 外部 agent 记录审查（`POST /api/approve`，`kind=unit-review`） | `in-review` | reviewer 为有名字的 subagent；`fileScope` 只引用该 unit 的输出文件；`outputHash` 等于输出文件当前内容 | 追加 unit-review；unit 变为 `approved` 或 `changes-requested` |
 
 #### Phase 4 自动推进
@@ -80,8 +81,8 @@ Phase 4 的主按钮（或 `POST /api/generate` 只带 `phase: 4`、不带 `unit
 |---|---|
 | 启动 | 前提与生成单个 unit 相同：当前阶段为 Phase 4；G1–G3 最新记录为 approved；`tokens/src` 里已有 token 文件；没有正在运行的任务 |
 | 选下一个 unit | 按 manifest 顺序取第一个未通过的 unit；它的依赖必须已满足，否则停下并说明缺哪些依赖 |
-| 该 unit 处于 `in-review` | 只运行审查，不重新生成 |
-| 其他状态（`not-started`、`in-progress`、`changes-requested`，或 `approved` 但审查已不对应当前输出） | 按单个 unit 的规则生成并审查；重新生成时 prompt 带上最近的审查意见 |
+| 该 unit 处于 `in-review`，或处于 `approved` 但输出在审查之后被改动 | 只运行审查，不重新生成；后者先按“unit 推进规则”转为 `in-review`，连同已通过的下游 unit |
+| 其他未通过的情况（`not-started`、`in-progress`、`changes-requested`，以及不属于上一行的 `approved`：输出缺失、manifest 已变化、没有对应的审查） | 按单个 unit 的规则生成并审查；重新生成时 prompt 带上最近的审查意见 |
 | 审查结论 `approved` | 进入下一个 unit |
 | 审查结论 `changes-requested`，本次推进中该 unit 生成未满 3 次 | 带着审查意见重新生成并审查 |
 | 审查结论 `changes-requested`，本次推进中该 unit 已生成 3 次 | 停下；unit 保持 `changes-requested`，任务报告该 unit 和最后一次审查的摘要 |

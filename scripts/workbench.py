@@ -421,19 +421,77 @@ def mark_unit_in_review(path, unit_id, generated_by=None):
         if not unit.get("files") or missing:
             raise ValueError("unit %s 缺少 output：%s" % (unit_id, ", ".join(missing) or "未声明文件"))
         set_unit_status(path, unit_id, IN_REVIEW)
-        manifest = _read_json(path / "src/ui/ir/manifest.json")
-        metadata = {
-            "unitId": unit_id,
-            "status": IN_REVIEW,
-            "files": unit["files"],
-            "manifestVersion": manifest["manifestVersion"],
-            "manifestHash": manifest["hash"],
-            "outputHash": check_workspace.unit_output_hash(path, unit),
-        }
-        if generated_by:
-            metadata["generatedBy"] = generated_by
+        metadata = _review_metadata(path, unit, _read_json(path / "src/ui/ir/manifest.json"), generated_by)
         _write_json(path / unit_dir(unit_id) / "metadata.json", metadata)
         return metadata
+
+
+def _review_metadata(path, unit, manifest, generated_by=None):
+    """metadata.json content for a unit entering review, bound to the manifest and the output now on disk."""
+    metadata = {
+        "unitId": unit["id"],
+        "status": IN_REVIEW,
+        "files": unit["files"],
+        "manifestVersion": manifest["manifestVersion"],
+        "manifestHash": manifest["hash"],
+        "outputHash": check_workspace.unit_output_hash(path, unit),
+    }
+    if generated_by:
+        metadata["generatedBy"] = generated_by
+    return metadata
+
+
+def _generated_by(path, unit_id):
+    """Who generated the unit, from its metadata.json; None when the file is missing or its JSON is damaged.
+    Other read errors (a directory in its place) still raise, before any status is written."""
+    try:
+        metadata = _read_json(path / unit_dir(unit_id) / "metadata.json", {})
+    except ValueError:
+        return None
+    return metadata.get("generatedBy") if isinstance(metadata, dict) else None
+
+
+def _edited_after_approval(path, manifest, states, reviews, unit):
+    """An approved unit whose output was edited after a review given on the current manifest. Such a unit needs a
+    review, not a rebuild; a manifest change still means regenerating against the new spec."""
+    review = reviews.get(unit["id"])
+    return (states.get(unit["id"]) == APPROVED and check_workspace.output_exists(path, unit)
+            and check_workspace.review_matches(review, manifest)
+            and review.get("outputHash") != check_workspace.unit_output_hash(path, unit))
+
+
+def reopen_unit_review(path, unit_id):
+    """Send an approved unit whose output was edited back to review, with the approved units built on it, and
+    return the reopened ids; [] when the unit is not in that situation. Only a review runs, so a hand edit is
+    judged instead of being overwritten by a regeneration."""
+    path = Path(path).expanduser().resolve()
+    with STATE_LOCK:
+        manifest = _read_json(path / "src/ui/ir/manifest.json")
+        states = _unit_states(path)
+        reviews = check_workspace.latest_unit_reviews(_read_json(path / "project/approvals.json", []))
+        if not _edited_after_approval(path, manifest, states, reviews, _unit_record(manifest, unit_id)):
+            return []
+        # Their reviews were given against the upstream output that has just changed. One without output has
+        # nothing to review and is redone, as when the upstream is regenerated.
+        plan = [(unit_id, IN_REVIEW, None)]
+        for dependent in _dependents(manifest, unit_id):
+            if states.get(dependent) != APPROVED:
+                continue
+            if check_workspace.output_exists(path, _unit_record(manifest, dependent)):
+                plan.append((dependent, IN_REVIEW, "上游 unit %s 的输出在审查后被改动，需要重新审查" % unit_id))
+            else:
+                plan.append((dependent, CHANGES_REQUESTED, "上游 unit %s 的输出在审查后被改动，且本 unit 缺少输出，需要重做" % unit_id))
+        # Everything is read and hashed before anything is written, so a failing read cannot leave half the
+        # units moved.
+        metadata = {
+            reopened_id: _review_metadata(path, _unit_record(manifest, reopened_id), manifest, _generated_by(path, reopened_id))
+            for reopened_id, status, _ in plan if status == IN_REVIEW
+        }
+        for reopened_id, status, note in plan:
+            set_unit_status(path, reopened_id, status, note)
+            if status == IN_REVIEW:
+                _write_json(path / unit_dir(reopened_id) / "metadata.json", metadata[reopened_id])
+        return [reopened_id for reopened_id, _, _ in plan]
 
 
 def g1_choice(records):
@@ -524,6 +582,7 @@ def unit_overview(path):
         state = states.get(unit["id"], NOT_STARTED)
         blocked_by = check_workspace.unsatisfied_dependencies(path, manifest, states, reviews, unit)
         review = reviews.get(unit["id"])
+        reviewable = state == IN_REVIEW or _edited_after_approval(path, manifest, states, reviews, unit)
         overview.append({
             "id": unit["id"],
             "kind": unit.get("kind"),
@@ -544,7 +603,8 @@ def unit_overview(path):
                 "current": check_workspace.review_on_output(path, review, manifest, unit),
             },
             "canGenerate": not phase_blocker and not blocked_by and not busy,
-            "canReview": not phase_blocker and state == IN_REVIEW and not busy,
+            "reviewable": reviewable,
+            "canReview": not phase_blocker and reviewable and not blocked_by and not busy,
         })
     # The same "passed" test the Phase 4 run uses, so the page names the unit the run would take next.
     current = next((unit["id"] for unit in manifest["units"]
@@ -1563,6 +1623,9 @@ def start_phase_four_run(path):
                     break
                 with JOBS_LOCK:
                     JOBS[job_id]["runUnit"] = unit_id
+                if state == APPROVED and reopen_unit_review(path, unit_id):
+                    _job_log(job_id, "自动推进：unit %s 通过后输出被改动，重新审查（不重新生成）。" % unit_id)
+                    state = IN_REVIEW
                 if state != IN_REVIEW:
                     count = generations.get(unit_id, 0)
                     if count == MAX_UNIT_GENERATIONS:
@@ -1603,9 +1666,17 @@ def start_review_job(path, phase, unit_id):
     path = Path(path).expanduser().resolve()
     with STATE_LOCK:
         _require_unit_phase(path, phase)
-        if _unit_states(path).get(unit_id) != IN_REVIEW:
-            raise ValueError("只有等待审查的 unit 可以重新审查")
+        # A unit is judged against its dependencies' outputs, so they must have passed first.
+        prepare_unit_generation(path, unit_id)
+        reopen = _unit_states(path).get(unit_id) != IN_REVIEW
         job_id = _create_job(path, "review " + unit_id, unit_id)
+        try:
+            if reopen and not reopen_unit_review(path, unit_id):
+                raise ValueError("只有等待审查、或通过后输出又被改动的 unit 可以重新审查")
+        except Exception:
+            with JOBS_LOCK:
+                JOBS.pop(job_id, None)
+            raise
 
     def run():
         try:

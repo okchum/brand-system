@@ -891,6 +891,103 @@ class UiWorkbenchTest(unittest.TestCase):
             self.assertEqual(job["status"], "done", job)
             self.assertEqual([unit for unit, running in seen.items() if running], ["layout"])
 
+    def test_phase_four_run_re_reviews_a_hand_edited_unit_without_regenerating(self):
+        with tempfile.TemporaryDirectory() as root:
+            workspace = self.phase_four(root)
+            self.run_phase_four(workspace)
+            write_output(workspace, "layout", "<main>fixed by hand</main>\n")
+            job, calls = self.run_phase_four(workspace)
+            self.assertEqual(job["status"], "done", job)
+            # The edited unit and the approved units built on it are reviewed again; nothing is regenerated.
+            downstream = ["layout", "reuse-analysis", "component", "page", "platform-adaptation"]
+            self.assertEqual(calls, [("review", unit) for unit in downstream])
+            self.assertEqual((workspace / workbench.unit_output_path("layout")).read_text(encoding="utf-8"), "<main>fixed by hand</main>\n")
+            self.assertEqual(self.read(root, "src/ui/units/layout/metadata.json")["outputHash"], current_output_hash(workspace, "layout"))
+            for unit in ["page-map"] + downstream:
+                self.assertEqual(self.unit_status(workspace, unit)["status"], "approved")
+
+    def test_re_review_redoes_a_dependent_that_lost_its_output(self):
+        with tempfile.TemporaryDirectory() as root:
+            workspace = self.phase_four(root)
+            self.run_phase_four(workspace)
+            (workspace / workbench.unit_output_path("component")).unlink()
+            write_output(workspace, "layout", "<main>fixed by hand</main>\n")
+            job, calls = self.run_phase_four(workspace)
+            self.assertEqual(job["status"], "done", job)
+            self.assertEqual(calls[:3], [("review", "layout"), ("review", "reuse-analysis"), ("generate", "component")])
+            self.assertEqual(self.unit_status(workspace, "platform-adaptation")["status"], "approved")
+
+    def test_a_changed_manifest_regenerates_instead_of_re_reviewing(self):
+        with tempfile.TemporaryDirectory() as root:
+            workspace = self.phase_four(root)
+            self.run_phase_four(workspace)
+            manifest_path = workspace / "src/ui/ir/manifest.json"
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            manifest["manifestVersion"] = manifest["manifestVersion"] + "-next"
+            manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+            workbench.sync_manifest_hash(workspace)
+            write_output(workspace, "page-map", "<main>edited for the old spec</main>\n")
+            self.assertEqual(workbench.reopen_unit_review(workspace, "page-map"), [])
+            self.assertFalse({u["id"]: u for u in workbench.unit_overview(workspace)["units"]}["page-map"]["reviewable"])
+            job, calls = self.run_phase_four(workspace)
+            self.assertEqual(calls[0], ("generate", "page-map"))
+
+    def test_re_review_survives_a_damaged_metadata_file(self):
+        with tempfile.TemporaryDirectory() as root:
+            workspace = self.phase_four(root)
+            self.run_phase_four(workspace)
+            (workspace / workbench.unit_dir("component") / "metadata.json").write_text("{bad", encoding="utf-8")
+            write_output(workspace, "layout", "<main>fixed by hand</main>\n")
+            job, calls = self.run_phase_four(workspace)
+            self.assertEqual(job["status"], "done", job)
+            self.assertNotIn(("generate", "layout"), calls)
+            self.assertEqual(self.read(root, "src/ui/units/component/metadata.json")["outputHash"], current_output_hash(workspace, "component"))
+
+    def test_re_review_waits_for_an_upstream_the_reviewer_rejected(self):
+        with tempfile.TemporaryDirectory() as root:
+            workspace = self.phase_four(root)
+            self.run_phase_four(workspace)
+            write_output(workspace, "layout", "<main>broken by hand</main>\n")
+            run, _ = self.fake_phase_four(verdicts={"layout": ["changes-requested"]})
+            with mock.patch.object(workbench, "_run_agent", side_effect=run), \
+                    mock.patch.object(workbench.subprocess, "run", return_value=subprocess.CompletedProcess([], 1, "", "")):
+                wait_for(workbench.start_review_job(workspace, 4, "layout"))
+            self.assertEqual(self.unit_status(workspace, "reuse-analysis")["status"], "in-review")
+            self.assertFalse({u["id"]: u for u in workbench.unit_overview(workspace)["units"]}["reuse-analysis"]["canReview"])
+            with self.assertRaisesRegex(ValueError, "layout"):
+                workbench.start_review_job(workspace, 4, "reuse-analysis")
+
+    def test_a_hand_edited_unit_the_reviewer_rejects_is_regenerated(self):
+        with tempfile.TemporaryDirectory() as root:
+            workspace = self.phase_four(root)
+            self.run_phase_four(workspace)
+            write_output(workspace, "layout", "<main>broken by hand</main>\n")
+            job, calls = self.run_phase_four(workspace, verdicts={"layout": ["changes-requested"]})
+            self.assertEqual(job["status"], "done", job)
+            self.assertEqual(calls[:3], [("review", "layout"), ("generate", "layout"), ("review", "layout")])
+            # Regenerating the upstream sends the units built on it back to be redone.
+            self.assertIn(("generate", "platform-adaptation"), calls)
+
+    def test_only_re_review_reopens_an_approved_unit_whose_output_changed(self):
+        with tempfile.TemporaryDirectory() as root:
+            workspace = self.phase_four(root)
+            self.review(workspace, "page-map")
+            self.review(workspace, "layout")
+            with self.assertRaisesRegex(ValueError, "重新审查"):
+                workbench.start_review_job(workspace, 4, "page-map")
+            self.assertFalse({u["id"]: u for u in workbench.unit_overview(workspace)["units"]}["page-map"]["canReview"])
+            write_output(workspace, "page-map", "<main>edited</main>\n")
+            self.assertTrue({u["id"]: u for u in workbench.unit_overview(workspace)["units"]}["page-map"]["canReview"])
+            run, calls = self.fake_phase_four()
+            with mock.patch.object(workbench, "_run_agent", side_effect=run), \
+                    mock.patch.object(workbench.subprocess, "run", return_value=subprocess.CompletedProcess([], 1, "", "")):
+                job = wait_for(workbench.start_review_job(workspace, 4, "page-map"))
+            self.assertEqual(job["status"], "done", job)
+            self.assertEqual(calls, [("review", "page-map")])
+            self.assertEqual(self.unit_status(workspace, "page-map")["status"], "approved")
+            # The approved unit built on it waits for its own review again.
+            self.assertEqual(self.unit_status(workspace, "layout")["status"], "in-review")
+
     def test_phase_four_run_needs_the_unit_preconditions(self):
         with tempfile.TemporaryDirectory() as root:
             workspace = self.at_phase(self.init(root), 4)
