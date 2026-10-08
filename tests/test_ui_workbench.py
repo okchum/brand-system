@@ -1683,6 +1683,12 @@ class WorkbenchPageTest(unittest.TestCase):
             else:
                 self.assertRegex(label, r"<(input|select|textarea)\b", "label neither names nor wraps a control: " + label[:80])
 
+    def test_a_failed_check_offers_the_phase_generator_again(self):
+        # A phase left in-review shows only a check button; when the check fails, regenerating must be possible.
+        failed = self.html[self.html.index("if(!j.ok){"):]
+        self.assertLess(failed.index("offerRegeneration(activePhase)"), failed.index("return}"))
+        self.assertIn("delete b.dataset.generated", self.html)
+
     def test_page_builds_every_preview_link_with_the_path_form(self):
         self.assertNotIn("/preview?", self.html)
         self.assertNotIn("/-/", self.html)
