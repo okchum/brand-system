@@ -32,7 +32,7 @@ import signal
 import stat
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import parse_qs, urlencode, urlparse
+from urllib.parse import parse_qs, quote, unquote, urlencode, urlparse, urlsplit
 
 import check_workspace
 from check_workspace import APPROVED, CHANGES_REQUESTED, IN_PROGRESS, IN_REVIEW, NOT_STARTED
@@ -53,6 +53,7 @@ def page_html():
         "stacks": check_workspace.STACK_PROFILES, "platforms": check_workspace.UI_PLATFORMS,
         "defaultEngine": check_workspace.DEFAULT_ENGINE, "recordableGates": list(GATE_SPECS),
         "maxUnitGenerations": MAX_UNIT_GENERATIONS,
+        "previewPrefix": PREVIEW_PREFIX, "previewSeparator": PREVIEW_SEPARATOR,
     }
     return HTML.replace("__AGENT_EFFORTS__", json.dumps({engine: list(levels) for engine, levels in check_workspace.AGENT_EFFORTS.items()})).replace("__UI_CONTRACT__", json.dumps(contract))
 
@@ -1987,14 +1988,26 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         if not self.trusted_request():
             return self.send_json({"error": "forbidden"}, 403)
-        parsed = urlparse(self.path)
+        # urlsplit, not urlparse: a ";" is part of a file name here, not the start of path parameters.
+        parsed = urlsplit(self.path)
         try:
             if parsed.path == "/":
                 return self.send_body(page_html().encode(), "text/html; charset=utf-8")
             q = parse_qs(parsed.query)
             if parsed.path == "/preview":
-                preview_path = self.workspace_path(q.get("path", [""])[0])
-                relative = q.get("file", [""])[0]
+                # Keeps links handed out in the query form working.
+                location = preview_url(self.workspace_path(q.get("path", [""])[0]), q.get("file", [""])[0])
+                self.send_response(302)
+                self.send_header("Location", location)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                return None
+            if parsed.path.startswith(PREVIEW_PREFIX):
+                encoded_workspace, separator, encoded_file = parsed.path[len(PREVIEW_PREFIX):].partition(PREVIEW_SEPARATOR)
+                if not separator:
+                    raise ValueError("预览地址无效")
+                preview_path = self.workspace_path(unquote(encoded_workspace))
+                relative = unquote(encoded_file)
                 if not relative or Path(relative).is_absolute() or ".." in Path(relative).parts:
                     raise ValueError("预览文件路径无效")
                 target = (preview_path / relative).resolve()
@@ -2091,6 +2104,16 @@ class Handler(BaseHTTPRequestHandler):
 
     def log_error(self, fmt, *args):
         sys.stderr.write("workbench: " + (fmt % args) + "\n")
+
+
+# A preview lives at /preview/<workspace, fully escaped>/-/<file path>, so a page's relative links resolve to files of
+# the same workspace the way they would on disk.
+PREVIEW_PREFIX = "/preview/"
+PREVIEW_SEPARATOR = "/-/"
+
+
+def preview_url(workspace, relative):
+    return PREVIEW_PREFIX + quote(str(workspace), safe="") + PREVIEW_SEPARATOR + quote(relative)
 
 
 def page_url(port, workspace=None):

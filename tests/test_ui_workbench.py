@@ -1676,6 +1676,13 @@ class WorkbenchPageTest(unittest.TestCase):
             else:
                 self.assertRegex(label, r"<(input|select|textarea)\b", "label neither names nor wraps a control: " + label[:80])
 
+    def test_page_builds_every_preview_link_with_the_path_form(self):
+        self.assertNotIn("/preview?", self.html)
+        self.assertNotIn("/-/", self.html)
+        page = workbench.page_html()
+        self.assertIn('"previewPrefix": "%s"' % workbench.PREVIEW_PREFIX, page)
+        self.assertIn('"previewSeparator": "%s"' % workbench.PREVIEW_SEPARATOR, page)
+
     def test_page_gets_its_choices_from_the_checker(self):
         page = workbench.page_html()
         self.assertNotIn("__", re.sub(r"__proto__", "", "".join(re.findall(r"const UI=.*?;", page))))
@@ -1796,11 +1803,58 @@ class UiWorkbenchHttpTest(unittest.TestCase):
         (self.workspace / "review/notes.md").write_text("# <b>notes</b>\n", encoding="utf-8")
         (self.workspace / "review/page.html").write_text("<main>page</main>", encoding="utf-8")
         for name, content_type in (("notes.md", "text/plain; charset=utf-8"), ("page.html", "text/html; charset=utf-8")):
-            url = "%s/preview?path=%s&file=review/%s" % (self.base, self.urllib.parse.quote(str(self.workspace)), name)
+            url = self.base + workbench.preview_url(self.workspace, "review/" + name)
             with self.urllib.request.urlopen(url) as response:
                 self.assertEqual(response.headers["Content-Type"], content_type)
                 self.assertIn("sandbox", response.headers["Content-Security-Policy"])
                 self.assertNotIn("allow-same-origin", response.headers["Content-Security-Policy"])
+
+    def test_relative_links_in_a_preview_open_files_of_the_same_workspace(self):
+        (self.workspace / "review").mkdir(exist_ok=True)
+        (self.workspace / "reports").mkdir(exist_ok=True)
+        (self.workspace / "review/05-release.html").write_text('<a href="../reports/qa report.md">QA</a>', encoding="utf-8")
+        (self.workspace / "reports/qa report.md").write_text("# QA\n", encoding="utf-8")
+        page = self.base + workbench.preview_url(self.workspace, "review/05-release.html")
+        # The browser resolves the page's relative link against the preview path.
+        link = self.urllib.parse.urljoin(page, self.urllib.parse.quote("../reports/qa report.md"))
+        with self.urllib.request.urlopen(link) as response:
+            self.assertEqual(response.read().decode("utf-8"), "# QA\n")
+            self.assertIn("sandbox", response.headers["Content-Security-Policy"])
+
+    def test_preview_redirect_cannot_inject_headers(self):
+        import http.client
+        connection = http.client.HTTPConnection("127.0.0.1", self.server.server_address[1])
+        path = "/preview?path=%s&file=a%%0D%%0ASet-Cookie:%%20x=1" % self.urllib.parse.quote(str(self.workspace))
+        connection.request("GET", path)
+        response = connection.getresponse()
+        self.assertEqual(response.status, 302)
+        self.assertIsNone(response.getheader("Set-Cookie"))
+        self.assertTrue(response.getheader("Location").startswith(workbench.PREVIEW_PREFIX))
+        connection.close()
+
+    def test_old_preview_addresses_redirect_to_the_path_form(self):
+        (self.workspace / "review").mkdir(exist_ok=True)
+        (self.workspace / "review/page.html").write_text("<main>page</main>", encoding="utf-8")
+        old = "%s/preview?path=%s&file=review/page.html" % (self.base, self.urllib.parse.quote(str(self.workspace)))
+        with self.urllib.request.urlopen(old) as response:
+            self.assertEqual(response.url, self.base + workbench.preview_url(self.workspace, "review/page.html"))
+            self.assertEqual(response.read().decode("utf-8"), "<main>page</main>")
+
+    def test_preview_paths_cannot_leave_the_workspace(self):
+        (self.root / "secret.txt").write_text("secret", encoding="utf-8")
+        encoded = self.urllib.parse.quote(str(self.workspace), safe="")
+        (self.workspace / "link.txt").symlink_to(self.root / "secret.txt")
+        outside = self.urllib.parse.quote(str(self.root.parent), safe="")
+        for prefix, tail in (
+            (encoded, "../secret.txt"), (encoded, "%2E%2E/secret.txt"), (encoded, "review/%2E%2E/%2E%2E/secret.txt"),
+            (encoded, "link.txt"), (encoded, "secret.txt%00.md"), (outside, self.root.name + "/secret.txt"),
+        ):
+            with self.subTest(tail=tail):
+                request = self.urllib.request.Request("%s/preview/%s/-/%s" % (self.base, prefix, tail))
+                with self.assertRaises(self.urllib.error.HTTPError) as caught:
+                    self.urllib.request.urlopen(request)
+                caught.exception.close()
+                self.assertEqual(caught.exception.code, 400)
 
     def write_tokens(self):
         tokens = self.workspace / "tokens/src"
@@ -1889,7 +1943,7 @@ class UiWorkbenchHttpTest(unittest.TestCase):
             (self.workspace / relative).parent.mkdir(parents=True, exist_ok=True)
             (self.workspace / relative).write_text("<html><head><title>t</title></head><body>x</body></html>", encoding="utf-8")
         def fetch(relative):
-            url = "%s/preview?path=%s&file=%s" % (self.base, self.urllib.parse.quote(str(self.workspace)), relative)
+            url = self.base + workbench.preview_url(self.workspace, relative)
             with self.urllib.request.urlopen(url) as response:
                 return response.read().decode("utf-8")
         unit = fetch("src/ui/units/page-map/output.html")
