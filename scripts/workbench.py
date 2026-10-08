@@ -1004,14 +1004,14 @@ def _require_unit_phase(path, phase):
 def _phase_prompt(phase, choice):
     deliverables = "、".join(_phase_requirements(phase))
     direction_instruction = (
-        "Phase 5 发布页必须读取 config/brand.json 和 project/approvals.json，"
+        "生成 Phase 5 发布页时读取 config/brand.json 和 project/approvals.json，把结果直接写进页面，"
         "只展示 G1 已选中的当前方向（本工作区为 Direction %s），"
         "不要在最终发布页并列展示 A/B/C 方案；可在说明文字中记录选择依据。"
         % choice
         if choice
         else "Phase 1 先生成三套方向并准备后续 G1 选择，不要假设已有方向审批。"
     )
-    return f"""在当前品牌工作区完成 Phase {phase} 交付。只写入当前工作区目录，不修改技能仓库或其他目录。读取 brand.brief.json、review/、docs/、project/ 和 config/ 中现有资料；如有 source.json，读取其中列出的参考资料。创建并验证本阶段必需文件：{deliverables}。保持方向选择、审批和暂定假设可追溯，不把未确认内容写成最终事实。确保每张方向卡片的 hero 标题、描述和图标有独立空间，文字与图标不能重叠，并检查浅色与深色背景下的对比度。每套方向必须包含一个较大的产品界面配色 demo，展示背景、文字、按钮、状态、层级和真实场景，不要只放色板。{direction_instruction}同步更新 project/status.json 为 phase {phase}、state in-review（其中的 units 字段原样保留，不要改动），并保存 reports/phase-{phase}-check.txt。不要只解释，直接创建文件。"""
+    return f"""在当前品牌工作区完成 Phase {phase} 交付。只写入当前工作区目录，不修改技能仓库或其他目录。读取 brand.brief.json、review/、docs/、project/ 和 config/ 中现有资料；如有 source.json，读取其中列出的参考资料。创建并验证本阶段必需文件：{deliverables}。审阅页按 {ROOT / "references/review-qa.md"} 的“自包含”要求生成，页面需要的数据在生成时写进页面，不用 fetch 在运行时读取。保持方向选择、审批和暂定假设可追溯，不把未确认内容写成最终事实。确保每张方向卡片的 hero 标题、描述和图标有独立空间，文字与图标不能重叠，并检查浅色与深色背景下的对比度。每套方向必须包含一个较大的产品界面配色 demo，展示背景、文字、按钮、状态、层级和真实场景，不要只放色板。{direction_instruction}同步更新 project/status.json 为 phase {phase}、state in-review（其中的 units 字段原样保留，不要改动），并保存 reports/phase-{phase}-check.txt。不要只解释，直接创建文件。"""
 
 
 def start_generation(path, phase):

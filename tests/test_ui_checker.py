@@ -76,6 +76,66 @@ class UiCheckerTest(unittest.TestCase):
     def assert_finding(self, findings, text):
         self.assertTrue(any(text in finding for finding in findings), "missing %r in %r" % (text, findings))
 
+    def test_review_pages_must_not_load_workspace_data_at_runtime(self):
+        root = self.make_workspace(phase=4)
+        page = root / "review/04-assets.html"
+        for script, flagged in (
+            ("fetch('../config/brand.json')", True),
+            ("const x = new XMLHttpRequest()", True),
+            ("localStorage.setItem('k', 1)", True),
+            ("document.cookie = 'a=1'", True),
+            ("document.body.dataset.theme = 'dark'", False),
+            ("window['fetch']('x')", True),
+        ):
+            with self.subTest(script=script):
+                page.write_text("<main>assets</main><script>%s</script>" % script, encoding="utf-8")
+                problems = [p for p in check_workspace.check(root, 4) if "review/04-assets.html" in p]
+                self.assertEqual(bool(problems), flagged, problems)
+        # What a guideline page says or shows is not what it does.
+        for html in (
+            "<p>我们不用 localStorage 保存主题，也不 fetch 任何数据。</p>",
+            "<pre>&lt;link href=\"tokens.css\"&gt; fetch('x')</pre>",
+            '<img data-src="lazy.png" src="data:image/png;base64,AAAA">',
+        ):
+            with self.subTest(html=html):
+                page.write_text("<main>%s</main>" % html, encoding="utf-8")
+                self.assertEqual([p for p in check_workspace.check(root, 4) if "review/04-assets.html" in p], [])
+        page.write_text('<script type="application/ld+json">{"name": "fetch guide"}</script>', encoding="utf-8")
+        self.assertEqual([p for p in check_workspace.check(root, 4) if "review/04-assets.html" in p], [])
+        page.write_text("<main>x</main><script>localStorage.getItem('k')", encoding="utf-8")
+        self.assertTrue([p for p in check_workspace.check(root, 4) if "review/04-assets.html" in p])
+        page.write_text('<button onclick="fetch(\'x\')">go</button>', encoding="utf-8")
+        self.assertTrue([p for p in check_workspace.check(root, 4) if "review/04-assets.html" in p])
+        page.write_bytes("<main>caf\xe9</main>".encode("latin-1"))
+        self.assertTrue([p for p in check_workspace.check(root, 4) if "review/04-assets.html: unreadable" in p])
+
+    def test_review_page_links_must_point_at_files_that_exist(self):
+        root = self.make_workspace(phase=4)
+        page = root / "review/04-assets.html"
+        (root / "reports").mkdir(exist_ok=True)
+        (root / "reports/qa report.md").write_text("# QA", encoding="utf-8")
+        cases = (
+            ('<a href="../reports/qa%20report.md#top">QA</a>', False),
+            ('<a href="../reports/missing.md">QA</a>', True),
+            ('<a href="../../outside.md">out</a>', True),
+            ('<a href="https://example.com/x">x</a><a href="#top">t</a><a href="mailto:a@b.c">m</a>', False),
+            ('<img src="data:image/png;base64,AAAA">', False),
+            ('<a href=../reports/missing.html>QA</a>', True),
+            ('<a href="../reports/qa%20report.md?x=1&amp;y=2">QA</a>', False),
+            ('<img src="../reports/qa%20report.md">', True),
+            ('<link rel="stylesheet" href="../reports/qa%20report.md">', True),
+            ('<svg><use href="#mark"></use></svg>', False),
+            ('<svg><a xlink:href="../reports/missing.md">x</a></svg>', True),
+            ('<a href="../link-out.md">out</a>', True),
+        )
+        (root / "link-out.md").symlink_to(Path(tempfile.mkdtemp()) / "outside.md")
+        (root / "link-out.md").resolve().write_text("outside", encoding="utf-8")
+        for html, flagged in cases:
+            with self.subTest(html=html):
+                page.write_text("<main>%s</main>" % html, encoding="utf-8")
+                problems = [p for p in check_workspace.check(root, 4) if "review/04-assets.html" in p]
+                self.assertEqual(bool(problems), flagged, problems)
+
     def test_phase_three_requires_ui_config_and_valid_frontend(self):
         root = self.make_workspace(phase=2)
         findings = check_workspace.check(root, 3)

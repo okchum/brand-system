@@ -257,6 +257,13 @@ class UiWorkbenchTest(unittest.TestCase):
             self.assertIn("Direction C", workbench.JOBS[job_id]["prompt"])
             self.assertNotIn("Direction B", workbench.JOBS[job_id]["prompt"])
 
+    def test_phase_prompts_ask_for_review_pages_that_carry_their_own_data(self):
+        prompt = workbench._phase_prompt(5, "C")
+        self.assertIn("写进页面", prompt)
+        self.assertIn("不用 fetch", prompt)
+        self.assertNotIn("必须读取", prompt)
+        self.assertIn("不用 fetch", workbench._phase_prompt(1, None))
+
     def test_sequential_progression_keeps_earlier_reviews_bound_to_the_manifest(self):
         with tempfile.TemporaryDirectory() as root:
             workspace = self.init(root)

@@ -18,7 +18,9 @@ import json
 import os
 import re
 import sys
+from html.parser import HTMLParser
 from pathlib import Path
+from urllib.parse import unquote
 from validate_brief import validate_file
 import directions_check
 
@@ -578,10 +580,90 @@ def check_units(ws, phase, status, manifest, latest_reviews, problems):
             problems.append("unit %s: %s must be approved to complete the phase" % (unit_id, state))
 
 
+# Review pages open in a sandboxed preview and as plain files: data has to be in the page when it is generated.
+# Script types a browser runs; others (application/ld+json, text/plain samples) are data, not code.
+SCRIPT_TYPES = {"", "module", "text/javascript", "application/javascript"}
+RUNTIME_DATA = re.compile(r"\b(fetch|XMLHttpRequest|localStorage|sessionStorage|indexedDB)\b|document\.cookie")
+URL_SCHEME = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*:")
+
+
+class _ReviewPage(HTMLParser):
+    """Collects what a browser would act on: <a href> links, other src/href loads, and script code. Text, escaped
+    code samples and data-* attributes are left alone."""
+
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.links, self.loads, self.code, self._in_script = [], [], [], False
+
+    def handle_starttag(self, tag, attrs):
+        for name, value in attrs:
+            if value is None:
+                continue
+            if name.startswith("on"):
+                self.code.append(value)
+            elif name in ("href", "xlink:href") and tag == "a":
+                self.links.append(value)
+            elif name in ("src", "href"):
+                self.loads.append(value)
+        self._in_script = tag == "script" and (dict(attrs).get("type") or "").strip().lower() in SCRIPT_TYPES
+
+    def handle_endtag(self, tag):
+        if tag == "script":
+            self._in_script = False
+
+    def handle_data(self, data):
+        if self._in_script:
+            self.code.append(data)
+
+    def close(self):
+        # html.parser keeps the body of a <script> that never closes in rawdata; a browser still runs it.
+        if self._in_script and self.rawdata:
+            self.code.append(self.rawdata)
+        super().close()
+
+
+def _workspace_reference(target):
+    """The path part of a reference into the workspace, or None for fragments, URLs and data URIs."""
+    if target.startswith("#") or target.startswith("//") or URL_SCHEME.match(target):
+        return None
+    return unquote(target.split("#", 1)[0].split("?", 1)[0]) or None
+
+
+def check_review_pages(ws, problems):
+    """Review pages must not read workspace data at runtime or load workspace files (styles, scripts, images and
+    fonts stay inline: the sandboxed preview refuses some of those loads), and their relative <a href> links must
+    open a file inside the workspace, resolved as the workbench serves it."""
+    root = Path(os.path.abspath(ws)).resolve()
+    review = root / "review"
+    for page in sorted(review.glob("*.html")) if review.is_dir() else []:
+        rel = page.relative_to(root)
+        try:
+            parser = _ReviewPage()
+            parser.feed(page.read_text(encoding="utf-8"))
+            parser.close()
+        except (OSError, UnicodeDecodeError) as exc:
+            problems.append("%s: unreadable (%s)" % (rel, exc.__class__.__name__))
+            continue
+        found = sorted({match.group(0) for match in RUNTIME_DATA.finditer("\n".join(parser.code))})
+        if found:
+            problems.append("%s: loads data at runtime (%s); write it into the page when generating it" % (rel, ", ".join(found)))
+        for target in parser.loads:
+            if _workspace_reference(target):
+                problems.append("%s: %s loads a workspace file; inline it or use a data URI" % (rel, target))
+        for target in parser.links:
+            path = _workspace_reference(target)
+            if path is None:
+                continue
+            resolved = Path(os.path.normpath(os.path.join(str(page.parent), path))).resolve()
+            if path.startswith("/") or not resolved.is_relative_to(root) or not resolved.is_file():
+                problems.append("%s: link %s does not open a file in the workspace" % (rel, target))
+
+
 def check(ws, phase, release=False):
     ws = Path(ws)
     problems = []
     check_files(ws, phase, problems)
+    check_review_pages(ws, problems)
     brief = load_json(ws, "brand.brief.json", problems) if (ws / "brand.brief.json").is_file() else None
     if (ws / "brand.brief.json").is_file():
         problems.extend("brand.brief.json: " + e for e in validate_file(ws / "brand.brief.json"))
